@@ -31,6 +31,9 @@
   var cardSent = '';
   var overHandled = false;
   var mark = 0;
+  var trail = [];
+  var spot = null;
+  var nudge = '';
 
   function key(type, code) {
     window.dispatchEvent(new KeyboardEvent(type, {
@@ -100,12 +103,25 @@
       var def = (G.Moves && G.Moves.ALL || []).find(function (m) {
         return m.name === raw || (G.T && G.T(m.name) === raw);
       });
+      var stat = '';
+      ((G.LevelUp && G.LevelUp.STATS) || []).some(function (s) {
+        if (s.title === raw || (G.T && G.T(s.title) === raw)) { stat = s.id; return true; }
+        return false;
+      });
+      var item = '';
+      ((G.Items && G.Items.LIST) || []).some(function (it) {
+        var en = G.T ? G.T(it.name) : '';
+        if (title.indexOf(it.name) >= 0 || (en && title.indexOf(en) >= 0)) { item = it.id; return true; }
+        return false;
+      });
       return {
         label: label,
         detail: [tag, ds].filter(Boolean).join('. ').slice(0, 180),
         move: def ? def.id : '',
         type: def ? def.type : '',
         kind: def ? def.kind : '',
+        stat: stat,
+        item: item,
         upgrade: /^(Nv\.|Lv\.)/.test(tag) || title.indexOf('→') >= 0 || title.indexOf('->') >= 0,
         fresh: tag.indexOf('Nuevo') === 0 || tag.indexOf('New') === 0
       };
@@ -160,20 +176,28 @@
     };
   }
 
-  /** Keep the slot with the highest-level attack selected. */
+  function hasAttack(g) {
+    return (g || []).some(function (m) { return m.kind !== 'buff'; });
+  }
+
+  /** Highest-level attack slot. A full bond stays on. A buff-only slot is never selected. */
   function useBestAttack() {
     var pl = G.Game.player;
     if (!pl || !pl.slots || !pl.slots.length) return;
-    var bestSlot = pl.active, bestLvl = -1;
-    (pl.slots[pl.active] || []).forEach(function (m) {
-      if (m.kind !== 'buff' && m.lvl > bestLvl) bestLvl = m.lvl;
-    });
+    var merged = -1;
+    pl.slots.forEach(function (g, i) { if (g.length >= 4 && hasAttack(g)) merged = i; });
+    if (merged >= 0) {
+      if (merged !== pl.active) tap('Digit' + (merged + 1));
+      return;
+    }
+    var bestSlot = -1, bestLvl = -1;
     pl.slots.forEach(function (g, i) {
+      if (!hasAttack(g)) return;
       g.forEach(function (m) {
         if (m.kind !== 'buff' && m.lvl > bestLvl) { bestLvl = m.lvl; bestSlot = i; }
       });
     });
-    if (bestSlot !== pl.active) tap('Digit' + (bestSlot + 1));
+    if (bestSlot >= 0 && bestSlot !== pl.active) tap('Digit' + (bestSlot + 1));
   }
 
   function heading() {
@@ -189,10 +213,29 @@
     return '';
   }
 
-  function safeDirs(pl) {
-    var soon = (G.Hazards.all || []).filter(function (h) {
-      return !h.hit && (h.delay - h.t) < HAZARD_SOON;
+  var TRAP_R = 74;
+
+  /** How deep (x, y) sits in an enemy area or a poison, sticky, or blast trap. */
+  function dangerDepth(x, y, pl) {
+    var depth = 0;
+    (G.Hazards.all || []).forEach(function (h) {
+      if (h.hit || !G.Hazards.inside(h, x, y, pl.r)) return;
+      if (h.kind === 'zone') depth += (h.r + pl.r * 0.6) - Math.hypot(x - h.x, y - h.y);
+      else depth += 24;
     });
+    if (G.World.specialsNear) {
+      G.World.specialsNear(x, y, TRAP_R + 40).forEach(function (p) {
+        if (p.type !== 'trap') return;
+        var dist = Math.hypot(x - p.x, y - (p.y - 8));
+        var rad = TRAP_R + pl.r * 0.4;
+        if (dist < rad) depth += rad - dist;
+      });
+    }
+    return depth;
+  }
+
+  function safeDirs(pl) {
+    var here = dangerDepth(pl.x, pl.y, pl);
     var out = [];
     DIRS.forEach(function (d) {
       var len = Math.hypot(d[1], d[2]) || 1;
@@ -200,7 +243,8 @@
       var y = pl.y + (d[0] === 'stand still' ? 0 : d[2] / len * STEP);
       // isFree also rejects water. The shield will not step into a pond.
       if (d[0] !== 'stand still' && !G.World.isFree(x, y, pl.r)) return;
-      if (soon.some(function (h) { return G.Hazards.inside(h, x, y, pl.r); })) return;
+      // Deeper into an area is refused. A step out of one we already occupy stays open.
+      if (dangerDepth(x, y, pl) > here + 1) return;
       out.push(d[0]);
     });
     return out;
@@ -238,13 +282,50 @@
     return out.slice(0, 20);
   }
 
+  /** Last 5s of feet, sampled while actually playing. */
+  function trackPos() {
+    var pl = G.Game.player;
+    if (!pl) return;
+    var now = Date.now();
+    var last = trail[trail.length - 1];
+    if (last && now - last.t < 200) return;
+    trail.push({ t: now, x: pl.x, y: pl.y });
+    var cut = now - 5500;
+    while (trail.length && trail[0].t < cut) trail.shift();
+  }
+
+  /** Every 3s, compare feet to the last sample. A nearby sample holds a random safe direction until the next one. */
+  function wander() {
+    var pl = G.Game.player;
+    if (!pl) { spot = null; nudge = ''; return; }
+    var now = Date.now();
+    if (!spot) { spot = { x: pl.x, y: pl.y, t: now }; nudge = ''; return; }
+    if (now - spot.t < 3000) return;
+    var dist = Math.hypot(pl.x - spot.x, pl.y - spot.y);
+    spot = { x: pl.x, y: pl.y, t: now };
+    if (dist > 120) { nudge = ''; return; }
+    var dirs = safeDirs(pl).filter(function (s) { return s !== 'stand still' && s !== heading(); });
+    if (!dirs.length) dirs = safeDirs(pl).filter(function (s) { return s !== 'stand still'; });
+    nudge = dirs.length ? dirs[(Math.random() * dirs.length) | 0] : '';
+  }
+
+  function posTrail() {
+    var now = Date.now();
+    return trail.filter(function (p) { return now - p.t <= 5000; }).map(function (p) {
+      return { x: Math.round(p.x), y: Math.round(p.y), dt: Math.round((now - p.t) / 100) / 10 };
+    });
+  }
+
   function snapshot(ph) {
     var pl = G.Game.player;
     var foes = [];
     if (pl && G.EnemyMgr) {
       foes = G.EnemyMgr.all().filter(function (e) { return e && !e.dead; }).map(function (e) {
         var dx = e.x - pl.x, dy = e.y - pl.y;
-        return { name: e.name, boss: !!e.boss, r: Math.round(e.r || 14), dist: Math.round(Math.hypot(dx, dy)), dx: Math.round(dx), dy: Math.round(dy) };
+        return {
+          name: e.name, boss: !!e.boss, shiny: !!e.shiny, thief: e.behavior === 'thief',
+          r: Math.round(e.r || 14), dist: Math.round(Math.hypot(dx, dy)), dx: Math.round(dx), dy: Math.round(dy)
+        };
       }).filter(function (e) { return e.dist < 260; }).sort(function (a, b) { return a.dist - b.dist; }).slice(0, 12);
     }
     var pickups = [];
@@ -258,10 +339,41 @@
     }
     var hazards = [];
     if (pl && G.Hazards) {
-      hazards = (G.Hazards.all || []).filter(function (h) { return !h.hit; }).map(function (h) {
-        var dx = (h.x || pl.x) - pl.x, dy = (h.y || pl.y) - pl.y;
-        return { kind: h.kind, dist: Math.round(Math.hypot(dx, dy)), dx: Math.round(dx), dy: Math.round(dy), delay: Math.round((h.delay - h.t) * 10) / 10 };
-      }).filter(function (h) { return h.dist < 220 || h.delay < HAZARD_SOON; }).slice(0, 4);
+      hazards = (G.Hazards.all || []).filter(function (h) {
+        if (h.hit) return false;
+        var dist = Math.hypot((h.x || 0) - pl.x, (h.y || 0) - pl.y);
+        return dist < 420 || (h.delay - h.t) < HAZARD_SOON || G.Hazards.inside(h, pl.x, pl.y, pl.r);
+      }).slice(0, 8).map(function (h) {
+        var dx = h.x - pl.x, dy = h.y - pl.y;
+        return {
+          kind: h.kind, dist: Math.round(Math.hypot(dx, dy)), dx: Math.round(dx), dy: Math.round(dy),
+          r: Math.round(h.r || 0), angle: h.angle || 0, len: Math.round(h.len || 0), w: Math.round(h.w || 0),
+          delay: Math.round((h.delay - h.t) * 10) / 10
+        };
+      });
+    }
+    var traps = [];
+    if (pl && G.World.specialsNear) {
+      traps = G.World.specialsNear(pl.x, pl.y, 200).filter(function (p) { return p.type === 'trap'; }).map(function (p) {
+        var dx = p.x - pl.x, dy = (p.y - 8) - pl.y;
+        return { kind: ['poison', 'sticky', 'boom'][p.kind] || 'trap', dx: Math.round(dx), dy: Math.round(dy), r: TRAP_R };
+      });
+    }
+    var goals = [];
+    if (pl && G.Rift && G.Rift.rift && !G.Rift.arena) {
+      var rdx = G.Rift.rift.x - pl.x, rdy = G.Rift.rift.y - pl.y;
+      goals.push({ kind: 'rift', dx: Math.round(rdx), dy: Math.round(rdy), dist: Math.round(Math.hypot(rdx, rdy)) });
+    }
+    if (pl && G.EnemyMgr) {
+      G.EnemyMgr.all().forEach(function (e) {
+        if (!e || e.dead || (!e.shiny && e.behavior !== 'thief')) return;
+        var dx = e.x - pl.x, dy = e.y - pl.y, dist = Math.hypot(dx, dy);
+        if (dist > 800) return;
+        goals.push({
+          kind: e.behavior === 'thief' ? 'thief' : 'shiny',
+          dx: Math.round(dx), dy: Math.round(dy), dist: Math.round(dist)
+        });
+      });
     }
     var liquid = null;
     if (pl && pl.inLiquid && G.World.liquidEffect(pl.mon.types).dmg) liquid = G.World.liquidKind();
@@ -280,12 +392,56 @@
       enemies: foes,
       pickups: pickups,
       blocks: pl ? blocksNear(pl) : [],
+      traps: traps,
       hazards: hazards,
+      goals: goals,
       safe: pl && ph === 'playing' ? safeDirs(pl) : [],
+      nudge: ph === 'playing' ? nudge : '',
+      trail: ph === 'playing' ? posTrail() : [],
       cards: ph === 'playing' || ph === 'cinematic' || ph === 'over' ? [] : cardsOf(ph),
       moves: pl ? knownMoves(pl) : [],
       bond: ph === 'bond' ? bondInfo(pl) : null
     };
+  }
+
+  var logKey = '';
+
+  function showNote(cmd) {
+    var note = cmd && cmd.note;
+    if (!note) return;
+    var panel = document.getElementById('bot-log');
+    if (!panel) {
+      panel = document.createElement('aside');
+      panel.id = 'bot-log';
+      panel.setAttribute('style', [
+        'position:fixed', 'top:12px', 'right:12px', 'z-index:35',
+        'width:min(320px,34vw)', 'max-height:calc(100dvh - 24px)', 'overflow:auto',
+        'padding:12px 14px', 'border-radius:12px', 'pointer-events:auto',
+        'background:rgba(8,16,36,.92)', 'border:2px solid #6ea8ff',
+        'color:#e8f0ff', 'font:13px/1.35 sans-serif', 'text-shadow:none'
+      ].join(';'));
+      panel.innerHTML = '<b style="font-size:15px">Laya</b>' +
+        '<p class="q" style="margin:8px 0 4px;color:#9ec0ff"></p>' +
+        '<p class="s" style="margin:0 0 8px;color:#c5d4ee"></p>' +
+        '<p class="a" style="margin:0 0 8px;font-weight:700"></p>' +
+        '<div class="h"></div>';
+      document.body.appendChild(panel);
+    }
+    panel.querySelector('.q').textContent = note.question || '';
+    panel.querySelector('.s').textContent = note.scene || '';
+    var answer = note.result || '';
+    if (note.raw) answer = note.raw + ' → ' + answer;
+    panel.querySelector('.a').textContent = (note.source === 'laya' ? 'Laya: ' : 'Rule: ') + answer;
+    var key = (note.source || '') + '|' + (note.question || '');
+    if (cmd.action === 'card') key += '|' + (note.result || '') + '|' + (note.raw || '');
+    if (key === logKey) return;
+    logKey = key;
+    var line = document.createElement('div');
+    line.style.cssText = 'padding:4px 0;border-top:1px solid rgba(255,255,255,.12);color:#d5e2ff';
+    line.textContent = (note.source === 'laya' ? 'Laya: ' : 'Rule: ') + answer;
+    var hist = panel.querySelector('.h');
+    hist.insertBefore(line, hist.firstChild);
+    while (hist.children.length > 12) hist.removeChild(hist.lastChild);
   }
 
   function apply(cmd, snap) {
@@ -308,7 +464,8 @@
 
   function tick() {
     var ph = phase();
-    if (ph === 'playing') { cardSent = ''; useBestAttack(); }
+    if (ph === 'playing') { cardSent = ''; useBestAttack(); trackPos(); wander(); }
+    else { trail = []; spot = null; nudge = ''; }
     if (ph === 'cinematic') { tap('Space'); return; }
     if (ph === 'over') {
       if (overHandled) return;
@@ -339,6 +496,7 @@
       if (!r.ok) throw new Error('decide ' + r.status);
       return r.json();
     }).then(function (cmd) {
+      showNote(cmd);
       apply(cmd, snap);
     }).catch(function (e) {
       console.warn('[bot]', e);
@@ -355,37 +513,64 @@
     return starts.length === 1 ? starts[0] : null;
   }
 
-  function begin(mon) {
+  function begin(mon, shiny, levels) {
     G.DB.playAsGuest();
     var save = G.DB.save;
     save.starter = mon.dex;
     save.partner = mon.dex;
     G.DB.grant(mon.dex, 'starter');
+    var canShiny = !!(G.Sprites && G.Sprites.hasShiny && G.Sprites.hasShiny(mon.dex));
+    save.partnerShiny = !!(shiny && canShiny);
+    if (save.partnerShiny) G.DB.grantShiny(mon.dex, 'bot');
+    var ups = G.DB.upgradesOf(mon.dex);
+    (G.Upgrades ? G.Upgrades.LIST : []).forEach(function (u) {
+      var n = Math.max(0, Math.min(u.max, levels[u.id] | 0));
+      if (n) ups[u.id] = n;
+      else delete ups[u.id];
+    });
     G.Flow.goMenu();
     G.Flow.play();
-    console.log('[bot] run', mon.name, G.Game.state);
+    console.log('[bot] run', mon.name, save.partnerShiny ? 'shiny' : '', G.Game.state);
+  }
+
+  function screen(html) {
+    var scr = document.createElement('section');
+    scr.className = 'scr';
+    scr.innerHTML = html;
+    document.body.appendChild(scr);
+    return scr;
   }
 
   function ask(then) {
     var preset = resolveMon(new URLSearchParams(location.search).get('mon'));
-    if (preset) { then(preset); return; }
-    var scr = document.createElement('section');
-    scr.className = 'scr';
-    scr.innerHTML =
+    var scr = screen(
       '<div class="box" style="width:min(420px,100%)">' +
       '<h2>Which Pokémon?</h2>' +
       '<p class="sub">Type a name or a Pokédex number</p>' +
       '<input id="bot-mon" class="field" placeholder="Pikachu or 25" autocomplete="off" spellcheck="false">' +
+      '<label class="sub" style="display:flex;gap:8px;align-items:center;margin:10px 0">' +
+      '<input id="bot-shiny" type="checkbox"> Shiny</label>' +
       '<p id="bot-mon-err" class="err"></p>' +
-      '<button id="bot-mon-ok" class="btn gold" type="button">Play</button></div>';
-    document.body.appendChild(scr);
+      '<button id="bot-mon-ok" class="btn gold" type="button">Next</button></div>'
+    );
     var input = document.getElementById('bot-mon');
     var err = document.getElementById('bot-mon-err');
+    var shinyBox = document.getElementById('bot-shiny');
+    if (preset) input.value = preset.name;
+    function syncShiny() {
+      var mon = resolveMon(input.value);
+      var can = !!(mon && G.Sprites && G.Sprites.hasShiny && G.Sprites.hasShiny(mon.dex));
+      shinyBox.disabled = !!(mon && !can);
+      if (!can) shinyBox.checked = false;
+    }
+    input.addEventListener('input', syncShiny);
+    syncShiny();
     function go() {
       var mon = resolveMon(input.value);
       if (!mon) { err.textContent = 'No single Pokémon matches that. Try the full name or its number.'; return; }
+      var shiny = shinyBox.checked;
       scr.remove();
-      then(mon);
+      askStats(mon, shiny, then);
     }
     document.getElementById('bot-mon-ok').onclick = go;
     input.addEventListener('keydown', function (e) {
@@ -397,15 +582,56 @@
     input.focus();
   }
 
+  function askStats(mon, shiny, then) {
+    var list = (G.Upgrades && G.Upgrades.LIST) || [];
+    var rows = list.map(function (u) {
+      return '<label class="sub" style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
+        '<span style="flex:1"><b>' + u.name + '</b> ' + u.unit + '</span>' +
+        '<input class="field" data-stat="' + u.id + '" type="number" min="0" max="' + u.max + '" value="0" style="width:76px">' +
+        '</label>';
+    }).join('');
+    var scr = screen(
+      '<div class="box" style="width:min(480px,100%);max-height:calc(100dvh - 24px);overflow:auto">' +
+      '<h2>Stats</h2>' +
+      '<p class="sub">' + mon.name + (shiny ? ' shiny' : '') + '. Levels for this run. Coins stay untouched.</p>' +
+      rows +
+      '<p id="bot-stat-err" class="err"></p>' +
+      '<button id="bot-stat-ok" class="btn gold" type="button">Play</button></div>'
+    );
+    function go() {
+      var levels = {};
+      var bad = false;
+      scr.querySelectorAll('[data-stat]').forEach(function (el) {
+        var u = G.Upgrades.BY[el.getAttribute('data-stat')];
+        var n = el.value === '' ? 0 : Number(el.value);
+        if (!Number.isInteger(n) || n < 0 || n > u.max) bad = true;
+        levels[u.id] = n;
+      });
+      if (bad) {
+        document.getElementById('bot-stat-err').textContent = 'Each stat has to be a whole number from 0 up to its max.';
+        return;
+      }
+      scr.remove();
+      then(mon, shiny, levels);
+    }
+    document.getElementById('bot-stat-ok').onclick = go;
+    scr.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      go();
+    });
+  }
+
   function arm() {
     if (!window.G || !G.DB || !G.Flow || !G.Game || !G.UI || !G.DEX) { setTimeout(arm, 50); return; }
     var boot = document.getElementById('boot');
     if (boot && !boot.classList.contains('hidden')) { setTimeout(arm, 50); return; }
     var tapEl = document.getElementById('tap-start');
     if (tapEl && !tapEl.classList.contains('hidden')) { tapEl.click(); setTimeout(arm, 50); return; }
-    ask(function (mon) {
+    ask(function (mon, shiny, levels) {
       if (G.Game.state === 'ui') {
-        try { begin(mon); }
+        try { begin(mon, shiny, levels); }
         catch (e) { console.error('[bot] start', e); return; }
       }
       if (!loop) { loop = true; setInterval(tick, 200); }

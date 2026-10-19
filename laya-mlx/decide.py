@@ -212,6 +212,93 @@ def _close_score(ux, uy, foes, reach, pr):
     return score
 
 
+# Whole trail inside this radius of its center counts as stuck.
+_STUCK_R = 64
+_STUCK_S = 5
+
+
+def _escape(snap, safe):
+    """Leave a patch the feet have not left for 5 seconds, on a different heading.
+
+    ponytail: one centroid. Opposite of the failed heading when that center is underfoot.
+    """
+    pts = [p for p in (snap.get("trail") or []) if isinstance(p, dict)]
+    if not any(float(p.get("dt") or 0) >= _STUCK_S for p in pts):
+        return None
+    xs = [float(p.get("x") or 0) for p in pts]
+    ys = [float(p.get("y") or 0) for p in pts]
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    if max(math.hypot(x - mx, y - my) for x, y in zip(xs, ys)) > _STUCK_R:
+        return None
+    ax = float(snap.get("x") or 0) - mx
+    ay = float(snap.get("y") or 0) - my
+    heading = snap.get("heading") or ""
+    if math.hypot(ax, ay) < 12:
+        hx, hy = _VECS.get(heading, (0, 0))
+        ax, ay = -float(hx), -float(hy)
+    best, best_score = None, -1e18
+    for label in safe:
+        vx, vy = _VECS[label]
+        length = math.hypot(vx, vy) or 1
+        score = vx / length * ax + vy / length * ay
+        if label == heading:
+            score -= 1000
+        if score > best_score:
+            best, best_score = label, score
+    return best
+
+
+def _circle_depth(dx, dy, cx, cy, rad):
+    return rad - math.hypot(float(dx) - cx, float(dy) - cy)
+
+
+def _beam_depth(h, cx, cy, pr):
+    ang = float(h.get("angle") or 0)
+    ca, sa = math.cos(ang), math.sin(ang)
+    px, py = cx - float(h.get("dx") or 0), cy - float(h.get("dy") or 0)
+    along = px * ca + py * sa
+    if along < -pr or along > float(h.get("len") or 0) + pr:
+        return 0.0
+    side = abs(-px * sa + py * ca)
+    half = float(h.get("w") or 0) / 2 + pr * 0.6
+    return half - side if side <= half else 0.0
+
+
+def _danger(snap, cx, cy, pr):
+    """Positive when this point sits in a trap blast or an enemy area."""
+    depth = 0.0
+    for h in snap.get("hazards") or []:
+        if h.get("kind") == "beam":
+            depth += _beam_depth(h, cx, cy, pr)
+        else:
+            d = _circle_depth(h.get("dx") or 0, h.get("dy") or 0, cx, cy, float(h.get("r") or 0) + pr * 0.6)
+            if d > 0:
+                depth += d
+    for t in snap.get("traps") or []:
+        d = _circle_depth(t.get("dx") or 0, t.get("dy") or 0, cx, cy, float(t.get("r") or 74) + pr * 0.4)
+        if d > 0:
+            depth += d
+    return depth
+
+
+_GOAL_RANK = {"thief": 3, "shiny": 2, "rift": 1}
+
+
+def _goal(snap):
+    """Meowth first (it flees), then a shiny, then a void."""
+    best = None
+    best_key = None
+    for g in snap.get("goals") or []:
+        kind = g.get("kind")
+        if kind not in _GOAL_RANK:
+            continue
+        key = (_GOAL_RANK[kind], -float(g.get("dist") or 0))
+        if best_key is None or key > best_key:
+            best, best_key = g, key
+    return best
+
+
 def steer(snap):
     """Keep walking. Dodge contact, stay off walls, close for a short attack, then collect.
 
@@ -225,12 +312,22 @@ def steer(snap):
             safe.append(s)
     if not safe:
         return "stand still"
+    nudge = snap.get("nudge")
+    if nudge in safe:
+        return nudge
+    goal = _goal(snap)
+    if not goal:
+        leave = _escape(snap, safe)
+        if leave:
+            return leave
     foes = snap.get("enemies") or []
     loot = snap.get("pickups") or []
     blocks = snap.get("blocks") or []
     pr = float(snap.get("r") or 14)
     heading = snap.get("heading") or ""
     reach = _attack_reach(snap)
+    gx = float(goal.get("dx") or 0) if goal else 0.0
+    gy = float(goal.get("dy") or 0) if goal else 0.0
     best, best_score = safe[0], -1e18
     for label in safe:
         vx, vy = _VECS[label]
@@ -241,8 +338,15 @@ def steer(snap):
             score += _close_score(ux, uy, foes, reach, pr)
         for ahead in _STEP:
             cx, cy = ux * ahead, uy * ahead
+            depth = _danger(snap, cx, cy, pr)
+            if depth > 0:
+                score -= 1600 + depth * 8
+            if goal:
+                score += (math.hypot(gx, gy) - math.hypot(gx - cx, gy - cy)) * 40
             if not reach:
                 for e in foes:
+                    if e.get("shiny") or e.get("thief"):
+                        continue
                     dist = math.hypot(float(e.get("dx") or 0) - cx, float(e.get("dy") or 0) - cy)
                     gap = float(e.get("r") or 14) + pr + 28
                     if dist < gap:
@@ -332,15 +436,67 @@ def _attack_cards(cards, moves):
     return out
 
 
+# Regen and experience first, then the other run-long stats. The berry is a one-shot heal.
+_PERMANENT = ("rgn", "xp", "atk", "hp", "cd", "def", "mag", "spd")
+_EXP_ITEMS = ("luckyegg",)
+_ATK_ITEMS = ("choiceband", "lifeorb")
+
+
+def _full_bond(moves):
+    return any((m.get("group") or 0) >= 4 for m in moves)
+
+
+def _permanent(cards):
+    by_stat = {}
+    for i, card in enumerate(cards):
+        sid = card.get("stat")
+        if sid and sid not in by_stat:
+            by_stat[sid] = i
+    for sid in _PERMANENT:
+        if sid in by_stat:
+            return by_stat[sid]
+    return None
+
+
+def _grouped_buff(moves, mid):
+    """True when this buff shares a slot with an attack."""
+    slots = {m.get("slot") for m in moves if m.get("id") == mid and (m.get("group") or 0) > 1}
+    return any(m.get("slot") in slots and m.get("kind") != "buff" for m in moves)
+
+
+def _bond_lead(moves):
+    for m in moves:
+        if (m.get("group") or 0) >= 4 and m.get("lead") and m.get("kind") != "buff":
+            return m
+    for m in moves:
+        if (m.get("group") or 0) >= 4 and m.get("kind") != "buff":
+            return m
+    return None
+
+
 def level_choice(cards, moves):
-    """Upgrade the move in use, else take Swords Dance or Harden, else a different-type 4th attack."""
+    """Upgrade the move in use, else a different-type 4th attack.
+
+    A buff is taken only as an upgrade of one already fused to an attack.
+    Once four moves are fused, take a permanent stat instead and keep upgrading only that fused attack.
+    """
+    if _full_bond(moves):
+        hit = _permanent(cards)
+        if hit is not None:
+            return hit
+        lead = _bond_lead(moves)
+        if lead:
+            return _find(cards, lambda c: c.get("move") == lead.get("id") and (c.get("upgrade") or "→" in (c.get("label") or "")))
+        return None
     using = _using(moves)
     if using:
         hit = _find(cards, lambda c: c.get("move") == using.get("id") and (c.get("upgrade") or "→" in (c.get("label") or "")))
         if hit is not None:
             return hit
     for mid in (SWORDS, HARDEN):
-        hit = _find(cards, lambda c, mid=mid: c.get("move") == mid)
+        if not _grouped_buff(moves, mid):
+            continue
+        hit = _find(cards, lambda c, mid=mid: c.get("move") == mid and (c.get("upgrade") or "→" in (c.get("label") or "")))
         if hit is not None:
             return hit
     slots = {m.get("slot") for m in moves}
@@ -400,6 +556,19 @@ def bond_choice(cards, moves, bond):
     return strongest()
 
 
+def item_choice(cards, time):
+    """Lucky Egg for the first 10 minutes, then Choice Band over Life Orb."""
+    ids = [c.get("item") or "" for c in cards]
+    if not any(ids):
+        return None
+    order = _EXP_ITEMS if float(time or 0) < 600 else _ATK_ITEMS
+    for iid in order:
+        for i, got in enumerate(ids):
+            if got == iid:
+                return i
+    return None
+
+
 def build_choice(snap):
     cards = snap.get("cards") or []
     if not cards:
@@ -407,26 +576,44 @@ def build_choice(snap):
     phase = snap.get("phase")
     if phase == "levelup":
         return level_choice(cards, _moves(snap))
+    if phase == "item":
+        return item_choice(cards, snap.get("time") or 0)
     if phase == "bond":
         return bond_choice(cards, _moves(snap), snap.get("bond"))
     return None
 
 
+def _note(source, question, result, scene, raw=None):
+    note = {"source": source, "question": question, "scene": scene, "result": result or ""}
+    if raw and raw != result:
+        note["raw"] = raw
+    return note
+
+
 def decide(agent, snap):
+    phase = snap.get("phase")
+    scene = describe(snap) if phase in ("playing", "levelup", "item", "bond") else ""
     forced = build_choice(snap)
     if forced is not None:
         cards = snap.get("cards") or []
+        label = cards[forced].get("label")
         return {
             "action": "card",
             "index": forced,
-            "label": cards[forced].get("label"),
+            "label": label,
             "shielded": False,
+            "note": _note("rule", "Which option should the Pokémon take?", label, scene),
         }
-    phase = snap.get("phase")
     if phase not in ("levelup", "item", "bond"):
         if phase != "playing":
             return {"action": "wait"}
-        return {"action": "move", "label": steer(snap), "shielded": False}
+        label = steer(snap)
+        return {
+            "action": "move",
+            "label": label,
+            "shielded": False,
+            "note": _note("rule", "Which way should the Pokémon move to stay alive?", label, scene),
+        }
     qs = questions_for(snap)
     if not qs:
         return {"action": "wait"}
@@ -443,6 +630,7 @@ def decide(agent, snap):
         "label": label,
         "index": index,
         "shielded": label != ans.get("choice"),
+        "note": _note("laya", qs["pick"]["instructions"], label, scene, ans.get("choice")),
     }
 
 
@@ -462,6 +650,13 @@ def _check():
         "safe": ["move west", "stand still"],
     })
     assert "Pidgey" in text and "north" in text and "move west" in text, text
+    noted = decide(None, {
+        "phase": "playing", "hp": 40, "maxHp": 90, "level": 2, "time": 12,
+        "enemies": [], "hazards": [], "pickups": [], "safe": ["move east"],
+    })
+    assert noted["action"] == "move" and noted["note"]["result"] == noted["label"], noted
+    assert noted["note"]["source"] == "rule" and noted["note"]["question"].startswith("Which way"), noted
+    assert "HP" in noted["note"]["scene"], noted
     ember = {"id": "ember", "name": "Ascuas", "kind": "projectile", "type": "fire", "lvl": 3, "slot": 0, "lead": True, "active": True, "group": 1}
     water = {"id": "water-gun", "name": "Pistola Agua", "kind": "projectile", "type": "water", "lvl": 1, "slot": 1, "lead": True, "active": False, "group": 1}
     swords = {"id": "swords-dance", "name": "Danza Espada", "kind": "buff", "type": "normal", "lvl": 1, "slot": 2, "lead": True, "active": False, "group": 1}
@@ -472,7 +667,11 @@ def _check():
         {"label": "Ascuas", "move": "ember", "kind": "projectile", "type": "fire", "upgrade": True},
     ]
     assert level_choice(up, moves) == 1
-    assert level_choice(up[:1], moves) == 0
+    assert level_choice(up[:1], moves) is None
+    fused_buff = [dict(ember, slot=0, group=2), dict(swords, slot=0, group=2, active=False)]
+    assert level_choice([
+        {"label": "Danza Espada", "move": "swords-dance", "upgrade": True},
+    ], fused_buff) == 0
     fourth = [
         {"label": "Lanzallamas", "move": "flamethrower", "kind": "cone", "type": "fire", "fresh": True},
         {"label": "Pistola Agua", "move": "water-gun", "kind": "projectile", "type": "water", "fresh": True},
@@ -496,6 +695,32 @@ def _check():
         {"label": "Pistola Agua", "move": "water-gun", "kind": "projectile", "type": "water"},
     ]
     assert bond_choice(off, moves + [flame], {"mode": "add", "step": 1, "group": ["ember", "swords-dance", "harden"], "first": ""}) == 1
+    fused = [dict(ember, group=4)]
+    assert level_choice([
+        {"label": "Ascuas", "move": "ember", "upgrade": True},
+        {"label": "Síntesis", "stat": "rgn"},
+    ], fused) == 1
+    assert level_choice([
+        {"label": "Potencia", "stat": "atk"},
+        {"label": "Aprendizaje", "stat": "xp"},
+    ], fused) == 1
+    assert level_choice([
+        {"label": "Lanzallamas", "move": "flamethrower", "fresh": True, "kind": "cone"},
+        {"label": "Ascuas", "move": "ember", "upgrade": True},
+    ], fused) == 1
+    assert item_choice([
+        {"item": "leftovers"}, {"item": "luckyegg"},
+    ], 120) == 1
+    assert item_choice([
+        {"item": "luckyegg"}, {"item": "choiceband"},
+    ], 120) == 0
+    assert item_choice([
+        {"item": "luckyegg"}, {"item": "choiceband"},
+    ], 600) == 1
+    assert item_choice([
+        {"item": "choiceband"}, {"item": "lifeorb"},
+    ], 700) == 0
+    assert item_choice([{"item": "leftovers"}, {"item": "shellbell"}], 100) is None
     ways = [s for s in MOVE_LABELS if s != "stand still"]
     assert steer({"safe": ways, "r": 14, "enemies": [{"dx": 0, "dy": -50, "r": 16}], "pickups": []}) == "move south"
     assert steer({"safe": ways, "r": 14, "enemies": [], "pickups": [{"kind": "coin", "dx": 100, "dy": 0}]}) == "move east"
@@ -530,6 +755,67 @@ def _check():
         "safe": ways, "r": 14, "moves": far, "pickups": [],
         "enemies": [{"dx": 0, "dy": -50, "r": 16}],
     }) == "move south"
+
+    def trail(pts, secs=5):
+        n = len(pts)
+        return [
+            {"x": x, "y": y, "dt": 0 if n == 1 else secs * (n - 1 - i) / (n - 1)}
+            for i, (x, y) in enumerate(pts)
+        ]
+
+    assert steer({
+        "safe": ways, "r": 14, "x": 100, "y": 100, "heading": "move east",
+        "trail": trail([(100, 100), (112, 96), (90, 108), (104, 88), (100, 100)]),
+        "enemies": [{"dx": 0, "dy": -40, "r": 16}],
+        "pickups": [{"kind": "coin", "dx": 80, "dy": 0}],
+    }) == "move west"
+    assert steer({
+        "safe": ways, "r": 14, "x": 100, "y": 0, "heading": "move south",
+        "trail": trail([(100, 30), (108, 40), (92, 48), (100, 36), (104, 44)]),
+        "enemies": [], "pickups": [],
+    }) == "move north"
+    assert steer({
+        "safe": ways, "r": 14, "x": 200, "y": 0, "heading": "move east",
+        "trail": trail([(i * 40, 0) for i in range(6)]),
+        "enemies": [], "pickups": [],
+    }) == "move east"
+    assert steer({
+        "safe": ways, "r": 14, "x": 100, "y": 100, "heading": "move east",
+        "trail": trail([(100, 100), (104, 100), (100, 102)], 2),
+        "enemies": [], "pickups": [],
+    }) == "move east"
+    assert steer({
+        "safe": ways, "r": 14, "enemies": [],
+        "pickups": [{"kind": "coin", "dx": 80, "dy": 0}],
+        "traps": [{"kind": "boom", "dx": 40, "dy": 0, "r": 74}],
+    }) == "move west"
+    assert steer({
+        "safe": ways, "r": 14, "enemies": [], "pickups": [],
+        "hazards": [{"kind": "zone", "dx": 0, "dy": -30, "r": 50, "delay": 1.2}],
+    }) == "move south"
+    assert steer({
+        "safe": ways, "r": 14,
+        "enemies": [{"dx": 80, "dy": 0, "r": 16, "shiny": True}],
+        "goals": [{"kind": "shiny", "dx": 80, "dy": 0, "dist": 80}],
+        "pickups": [{"kind": "coin", "dx": -100, "dy": 0}],
+    }) == "move east"
+    assert steer({
+        "safe": ways, "r": 14, "nudge": "move north",
+        "enemies": [{"dx": 80, "dy": 0, "r": 16, "shiny": True}],
+        "goals": [{"kind": "shiny", "dx": 80, "dy": 0, "dist": 80}],
+        "pickups": [{"kind": "coin", "dx": 80, "dy": 0}],
+    }) == "move north"
+    assert steer({
+        "safe": ["move east"], "r": 14, "nudge": "move north",
+        "enemies": [], "pickups": [], "heading": "move east",
+    }) == "move east"
+    assert steer({
+        "safe": ways, "r": 14, "enemies": [], "pickups": [],
+        "goals": [
+            {"kind": "rift", "dx": 40, "dy": 0, "dist": 40},
+            {"kind": "thief", "dx": 0, "dy": -120, "dist": 120},
+        ],
+    }) == "move north"
     print("ok")
 
 
