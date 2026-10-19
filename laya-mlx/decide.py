@@ -170,11 +170,54 @@ _VECS = {
 }
 
 
-def steer(snap):
-    """Keep walking. Dodge wild Pokémon, stay off walls and trees, then collect.
+# Under this, the old "stay 150px away" kite keeps the hit from landing.
+_SHORT = 180
 
-    ponytail: eight fixed directions, rescored every snapshot. A real pathfinder
-    would be the upgrade if it starts trapping itself in crowds.
+
+def _attack_reach(snap):
+    """Shortest live attack in the firing slot. 0 when every shot already reaches."""
+    reaches = []
+    for m in snap.get("moves") or []:
+        if not m.get("active") or m.get("kind") == "buff":
+            continue
+        reach = float(m.get("reach") or 0)
+        if 0 < reach < _SHORT:
+            reaches.append(reach)
+    return min(reaches) if reaches else 0.0
+
+
+def _close_score(ux, uy, foes, reach, pr):
+    """Step toward the nearest foe until it is inside `reach`, and stop at contact.
+
+    The probe is one tick long, and shorter when a full step would walk into them.
+    """
+    if not foes:
+        return 0.0
+    near = min(foes, key=lambda e: math.hypot(float(e.get("dx") or 0), float(e.get("dy") or 0)))
+    score = 0.0
+    for e in foes:
+        dx, dy = float(e.get("dx") or 0), float(e.get("dy") or 0)
+        now = math.hypot(dx, dy)
+        body = float(e.get("r") or 14) + pr + 4
+        step = 16.0
+        if e is near and dx * ux + dy * uy > 0 and now > body:
+            step = min(step, now - body)
+        dist = math.hypot(dx - ux * step, dy - uy * step)
+        if dist < body:
+            score -= 1200 + (body - dist) * 10
+        elif e is near and dist <= reach:
+            score += 500
+        elif e is near and dist < now:
+            score += (now - dist) * 50
+    return score
+
+
+def steer(snap):
+    """Keep walking. Dodge contact, stay off walls, close for a short attack, then collect.
+
+    ponytail: eight fixed directions, rescored every snapshot. Short attacks use one
+    16px probe toward the nearest foe. A real pathfinder would be the upgrade if it
+    starts trapping itself in crowds.
     """
     safe = []
     for s in snap.get("safe") or []:
@@ -187,21 +230,25 @@ def steer(snap):
     blocks = snap.get("blocks") or []
     pr = float(snap.get("r") or 14)
     heading = snap.get("heading") or ""
+    reach = _attack_reach(snap)
     best, best_score = safe[0], -1e18
     for label in safe:
         vx, vy = _VECS[label]
         length = math.hypot(vx, vy) or 1
         ux, uy = vx / length, vy / length
         score = 18 if label == heading else 0
+        if reach:
+            score += _close_score(ux, uy, foes, reach, pr)
         for ahead in _STEP:
             cx, cy = ux * ahead, uy * ahead
-            for e in foes:
-                dist = math.hypot(float(e.get("dx") or 0) - cx, float(e.get("dy") or 0) - cy)
-                gap = float(e.get("r") or 14) + pr + 28
-                if dist < gap:
-                    score -= 1200 + (gap - dist) * 10
-                elif dist < 150:
-                    score -= (150 - dist) * (3 if e.get("boss") else 1.6)
+            if not reach:
+                for e in foes:
+                    dist = math.hypot(float(e.get("dx") or 0) - cx, float(e.get("dy") or 0) - cy)
+                    gap = float(e.get("r") or 14) + pr + 28
+                    if dist < gap:
+                        score -= 1200 + (gap - dist) * 10
+                    elif dist < 150:
+                        score -= (150 - dist) * (3 if e.get("boss") else 1.6)
             for b in blocks:
                 bx, by = float(b.get("dx") or 0), float(b.get("dy") or 0)
                 dist = math.hypot(bx - cx, by - cy)
@@ -464,6 +511,25 @@ def _check():
         "safe": ways, "r": 14, "enemies": [], "pickups": [],
         "blocks": [{"dx": 30, "dy": 0, "r": 16}],
     }) == "move west"
+    melee = [{"id": "tackle", "kind": "melee", "lvl": 1, "active": True, "reach": 48}]
+    assert steer({
+        "safe": ways, "r": 14, "moves": melee, "pickups": [],
+        "enemies": [{"dx": 0, "dy": -100, "r": 16}],
+    }) == "move north"
+    assert steer({
+        "safe": ways, "r": 14, "moves": melee,
+        "enemies": [{"dx": 0, "dy": -100, "r": 16}],
+        "pickups": [{"kind": "coin", "dx": 0, "dy": 80}],
+    }) == "move north"
+    assert steer({
+        "safe": ways, "r": 14, "moves": melee, "pickups": [],
+        "enemies": [{"dx": 0, "dy": -20, "r": 16}],
+    }) != "move north"
+    far = [{"id": "ember", "kind": "projectile", "lvl": 1, "active": True, "reach": 496}]
+    assert steer({
+        "safe": ways, "r": 14, "moves": far, "pickups": [],
+        "enemies": [{"dx": 0, "dy": -50, "r": 16}],
+    }) == "move south"
     print("ok")
 
 

@@ -27,7 +27,7 @@ That serves `pokesurvivor/dev.html` at `http://127.0.0.1:8765` and opens it in a
 
 ## How it plays
 
-Movement is a fixed rule, not the model. The Pokémon keeps walking, steps away from wild Pokémon before they touch it, stays clear of walls and trees so its shots are not swallowed, and walks toward nearby experience and coins.
+Movement is a fixed rule, not the model. The Pokémon keeps walking and steps away before a wild Pokémon touches it. It stays clear of walls and trees so its shots are not swallowed. When the attack it is using is short range, it closes until that attack can connect, then holds that distance. It also walks toward nearby experience and coins.
 
 Level-up and bonding are also fixed:
 

@@ -112,13 +112,25 @@
     });
   }
 
+  /** Distance at which this move actually connects. 0 for buffs and ground traps. */
+  function hitReach(m) {
+    if (!m || m.kind === 'buff' || m.kind === 'trail' || m.kind === 'mine' || m.kind === 'turret') return 0;
+    if (m.kind === 'cone' || m.kind === 'nova' || m.kind === 'projectile') {
+      return Math.round((m.speed || 0) * (m.life || 0));
+    }
+    if (m.kind === 'chain') return 280;
+    if (m.kind === 'meteor') return 340;
+    return Math.round(m.radius || 0);
+  }
+
   function knownMoves(pl) {
     var out = [];
     (pl.slots || []).forEach(function (g, si) {
       g.forEach(function (m, mi) {
         out.push({
           name: m.name, id: m.id, kind: m.kind, type: m.type, lvl: m.lvl,
-          slot: si, lead: mi === 0, active: si === pl.active, group: g.length
+          slot: si, lead: mi === 0, active: si === pl.active, group: g.length,
+          reach: hitReach(m)
         });
       });
     });
