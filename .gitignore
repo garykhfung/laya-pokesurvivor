@@ -1,0 +1,10 @@
+# The game is its own git checkout. Update it there; this repo does not track it.
+pokesurvivor/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+.DS_Store
