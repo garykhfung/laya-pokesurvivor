@@ -7,7 +7,11 @@ one of those, the next-highest safe label is used instead.
     python laya-mlx/decide.py
 """
 
+import copy
+import json
 import math
+import time
+from pathlib import Path
 
 # Phrases, not single words: Laya follows these more reliably.
 MOVE_LABELS = [
@@ -170,18 +174,103 @@ _VECS = {
 }
 
 
-# Under this, the old "stay 150px away" kite keeps the hit from landing.
-_SHORT = 180
+# One step per death. Laya picks the knob and the direction; these bounds pick the number.
+STEPS = {"kite": 10, "short": 10, "contact_gap": 4, "trap_weight": 200, "egg_until": 30}
+CLAMP = {
+    "kite": (80, 260),
+    "short": (48, 320),
+    "contact_gap": (8, 64),
+    "trap_weight": (200, 4000),
+    "egg_until": (120, 900),
+}
+# Phrases, not single words: Laya follows these more reliably.
+KNOB_LABEL = {
+    "kite": "kite distance",
+    "contact_gap": "contact gap",
+    "short": "closing distance",
+    "trap_weight": "trap penalty",
+    "egg_until": "lucky egg time",
+    "item_late": "held item order",
+    "stat_order": "stat order",
+}
+WAY_LABEL = {
+    "increase": "increase it",
+    "decrease": "decrease it",
+    "earlier": "move it earlier",
+    "later": "move it later",
+}
+LABEL_KNOB = {label: key for key, label in KNOB_LABEL.items()}
+LABEL_WAY = {label: key for key, label in WAY_LABEL.items()}
+RUNS = Path(__file__).resolve().parent.parent / "runs"
+RUN_ID = None
+_RUN_N = 0
+
+
+def default_policy():
+    """Today's constants. A death moves one of these, then the next life reads the file."""
+    return {
+        "id": "p0",
+        "parent": None,
+        "kite": 150,
+        "short": 180,
+        "contact_gap": 28,
+        "trap_weight": 1600,
+        "egg_until": 600,
+        "stat_order": ["rgn", "xp", "atk", "hp", "cd", "def", "mag", "spd"],
+        "item_late": ["choiceband", "lifeorb"],
+    }
+
+
+POLICY = default_policy()
+
+
+def set_policy(policy):
+    global POLICY
+    POLICY = copy.deepcopy(policy)
+
+
+def begin_life():
+    global RUN_ID, _RUN_N
+    _RUN_N += 1
+    RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-%d" % _RUN_N
+    return RUN_ID
+
+
+def save_policy(path, policy):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+
+
+def load_policy(path=None):
+    """Read runs/policy.json. The first run writes today's constants."""
+    path = Path(path) if path else RUNS / "policy.json"
+    policy = default_policy()
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        for key in policy:
+            if key in data:
+                policy[key] = data[key]
+        set_policy(policy)
+    else:
+        set_policy(policy)
+        save_policy(path, POLICY)
+    begin_life()
+    return POLICY
 
 
 def _attack_reach(snap):
     """Shortest live attack in the firing slot. 0 when every shot already reaches."""
     reaches = []
+    short = float(POLICY["short"])
     for m in snap.get("moves") or []:
         if not m.get("active") or m.get("kind") == "buff":
             continue
         reach = float(m.get("reach") or 0)
-        if 0 < reach < _SHORT:
+        if 0 < reach < short:
             reaches.append(reach)
     return min(reaches) if reaches else 0.0
 
@@ -326,6 +415,9 @@ def steer(snap):
     pr = float(snap.get("r") or 14)
     heading = snap.get("heading") or ""
     reach = _attack_reach(snap)
+    kite = float(POLICY["kite"])
+    gap_extra = float(POLICY["contact_gap"])
+    trap_weight = float(POLICY["trap_weight"])
     gx = float(goal.get("dx") or 0) if goal else 0.0
     gy = float(goal.get("dy") or 0) if goal else 0.0
     best, best_score = safe[0], -1e18
@@ -340,7 +432,7 @@ def steer(snap):
             cx, cy = ux * ahead, uy * ahead
             depth = _danger(snap, cx, cy, pr)
             if depth > 0:
-                score -= 1600 + depth * 8
+                score -= trap_weight + depth * 8
             if goal:
                 score += (math.hypot(gx, gy) - math.hypot(gx - cx, gy - cy)) * 40
             if not reach:
@@ -348,11 +440,11 @@ def steer(snap):
                     if e.get("shiny") or e.get("thief"):
                         continue
                     dist = math.hypot(float(e.get("dx") or 0) - cx, float(e.get("dy") or 0) - cy)
-                    gap = float(e.get("r") or 14) + pr + 28
+                    gap = float(e.get("r") or 14) + pr + gap_extra
                     if dist < gap:
                         score -= 1200 + (gap - dist) * 10
-                    elif dist < 150:
-                        score -= (150 - dist) * (3 if e.get("boss") else 1.6)
+                    elif dist < kite:
+                        score -= (kite - dist) * (3 if e.get("boss") else 1.6)
             for b in blocks:
                 bx, by = float(b.get("dx") or 0), float(b.get("dy") or 0)
                 dist = math.hypot(bx - cx, by - cy)
@@ -436,10 +528,8 @@ def _attack_cards(cards, moves):
     return out
 
 
-# Regen and experience first, then the other run-long stats. The berry is a one-shot heal.
-_PERMANENT = ("rgn", "xp", "atk", "hp", "cd", "def", "mag", "spd")
+# Lucky Egg is the early hold. The late order lives on the policy.
 _EXP_ITEMS = ("luckyegg",)
-_ATK_ITEMS = ("choiceband", "lifeorb")
 
 
 def _full_bond(moves):
@@ -452,7 +542,7 @@ def _permanent(cards):
         sid = card.get("stat")
         if sid and sid not in by_stat:
             by_stat[sid] = i
-    for sid in _PERMANENT:
+    for sid in POLICY["stat_order"]:
         if sid in by_stat:
             return by_stat[sid]
     return None
@@ -561,7 +651,7 @@ def item_choice(cards, time):
     ids = [c.get("item") or "" for c in cards]
     if not any(ids):
         return None
-    order = _EXP_ITEMS if float(time or 0) < 600 else _ATK_ITEMS
+    order = _EXP_ITEMS if float(time or 0) < float(POLICY["egg_until"]) else tuple(POLICY["item_late"])
     for iid in order:
         for i, got in enumerate(ids):
             if got == iid:
@@ -632,6 +722,258 @@ def decide(agent, snap):
         "shielded": label != ans.get("choice"),
         "note": _note("laya", qs["pick"]["instructions"], label, scene, ans.get("choice")),
     }
+
+
+def cause_of(snap):
+    """First matching tag. The game never names the killer, so this is inferred.
+
+    Enemy shots are not in the snapshot yet, so a hit with no overlap stays unseen.
+    """
+    if snap.get("liquid"):
+        return "liquid"
+    pr = float(snap.get("r") or 14)
+    for trap in snap.get("traps") or []:
+        dist = math.hypot(float(trap.get("dx") or 0), float(trap.get("dy") or 0))
+        if dist <= float(trap.get("r") or 74):
+            return "trap:" + (trap.get("kind") or "trap")
+    for hazard in snap.get("hazards") or []:
+        if hazard.get("kind") == "beam":
+            if _beam_depth(hazard, 0, 0, pr) > 0:
+                return "hazard:beam"
+        else:
+            rad = float(hazard.get("r") or 0) + pr * 0.6
+            if _circle_depth(hazard.get("dx") or 0, hazard.get("dy") or 0, 0, 0, rad) > 0:
+                return "hazard:" + (hazard.get("kind") or "zone")
+    nearest, nearest_d, close = None, 1e18, 0
+    for foe in snap.get("enemies") or []:
+        dist = float(foe.get("dist") or math.hypot(float(foe.get("dx") or 0), float(foe.get("dy") or 0)))
+        if dist < nearest_d:
+            nearest, nearest_d = foe, dist
+        if dist < 80:
+            close += 1
+    if nearest is not None and nearest_d < float(nearest.get("r") or 14) + pr + 8:
+        return "contact:" + (nearest.get("name") or "wild Pokémon")
+    if close >= 4:
+        return "crowd"
+    return "unseen"
+
+
+def _melee(death, policy):
+    short = float(policy["short"])
+    for move in death.get("moves") or []:
+        if not move.get("active") or move.get("kind") == "buff":
+            continue
+        reach = float(move.get("reach") or 0)
+        if move.get("kind") == "melee" or 0 < reach < short:
+            return True
+    return False
+
+
+def knobs_for(death, policy):
+    """Knobs this death is allowed to move. shot_weight stays out until shots are recorded."""
+    cause = death.get("cause") or ""
+    out = []
+
+    def add(key):
+        if key not in out:
+            out.append(key)
+
+    if cause.startswith("contact") or cause == "crowd":
+        add("kite")
+        add("contact_gap")
+    if cause.startswith("contact") and _melee(death, policy):
+        add("short")
+    if cause == "liquid" or cause.startswith("trap") or cause.startswith("hazard"):
+        add("trap_weight")
+    survived = float(death.get("time") or 0)
+    item = death.get("item") or ""
+    egg = float(policy["egg_until"])
+    if (survived < egg and item != "luckyegg") or (survived >= egg and item == "luckyegg"):
+        add("egg_until")
+    if survived >= egg:
+        add("item_late")
+    if death.get("full_bond") or _full_bond(death.get("moves") or []):
+        add("stat_order")
+    return out
+
+
+def ways_for(knobs):
+    ways = []
+    if any(key in STEPS for key in knobs):
+        ways.extend(["increase", "decrease"])
+    if any(key in ("stat_order", "item_late") for key in knobs):
+        ways.extend(["earlier", "later"])
+    return ways
+
+
+def death_text(death, policy, knobs):
+    parts = [
+        "The Pokémon died from %s. It survived %d seconds."
+        % (death.get("cause") or "an unknown hit", int(float(death.get("time") or 0)))
+    ]
+    samples = death.get("last_hp") or []
+    if samples:
+        parts.append("Recent HP: %s." % ", ".join(str(int(p.get("hp") or 0)) for p in samples))
+    bits = []
+    for key in knobs:
+        val = policy[key]
+        shown = ", ".join(val) if isinstance(val, list) else str(val)
+        bits.append("%s is %s" % (KNOB_LABEL[key], shown))
+    if bits:
+        parts.append("Current settings: %s." % ". ".join(bits))
+    return " ".join(parts)
+
+
+def _child_id(policy_id):
+    tail = str(policy_id or "p0")[1:]
+    n = int(tail) if tail.isdigit() else 0
+    return "p%d" % (n + 1)
+
+
+def _nudge_list(items, focus, earlier):
+    items = list(items)
+    if focus not in items:
+        return None
+    i = items.index(focus)
+    j = i - 1 if earlier else i + 1
+    if j < 0 or j >= len(items):
+        return None
+    items[i], items[j] = items[j], items[i]
+    return items
+
+
+def _thin_stat(death, order):
+    stats = death.get("stats") or {}
+    return min(order, key=lambda sid: (int(stats.get(sid) or 0), order.index(sid)))
+
+
+def _focus_item(order):
+    if "choiceband" in order:
+        return "choiceband"
+    return order[0] if order else None
+
+
+def apply_step(policy, knob, way, death):
+    """One clamped step. No change (already at the bound, or a bad pair) leaves the policy."""
+    nxt = copy.deepcopy(policy)
+    if knob in STEPS:
+        if way == "earlier":
+            way = "increase"
+        elif way == "later":
+            way = "decrease"
+        if way not in ("increase", "decrease"):
+            return None, None
+        delta = STEPS[knob] if way == "increase" else -STEPS[knob]
+        raw = float(nxt[knob]) + delta
+        lo, hi = CLAMP[knob]
+        val = min(hi, max(lo, raw))
+        if isinstance(nxt[knob], int):
+            val = int(val)
+        if val == nxt[knob]:
+            return None, None
+        edit = {"knob": knob, "from": nxt[knob], "to": val}
+        nxt[knob] = val
+    elif knob in ("stat_order", "item_late"):
+        if way == "increase":
+            way = "earlier"
+        elif way == "decrease":
+            way = "later"
+        if way not in ("earlier", "later"):
+            return None, None
+        old = list(nxt[knob])
+        focus = _thin_stat(death, old) if knob == "stat_order" else _focus_item(old)
+        moved = _nudge_list(old, focus, way == "earlier")
+        if not moved:
+            return None, None
+        edit = {"knob": knob, "from": old, "to": moved}
+        nxt[knob] = moved
+    else:
+        return None, None
+    nxt["parent"] = policy["id"]
+    nxt["id"] = _child_id(policy["id"])
+    return nxt, edit
+
+
+def ask_laya(agent, death, policy):
+    """Ask the loaded Laya checkpoint which knob, and which way. A failed call changes nothing."""
+    knobs = knobs_for(death, policy)
+    if not knobs:
+        return None, None
+    ways = ways_for(knobs)
+    questions = {
+        "knob": {
+            "type": "choice",
+            "instructions": "Which one setting should change after this death?",
+            "criteria": [KNOB_LABEL[key] for key in knobs],
+        },
+        "way": {
+            "type": "choice",
+            "instructions": "Which way should that setting move?",
+            "criteria": [WAY_LABEL[key] for key in ways],
+        },
+    }
+    try:
+        result = agent.predict(death_text(death, policy, knobs), questions)
+        answers = result["answers"]
+    except Exception:
+        return None, None
+    if "knob" not in answers or "way" not in answers:
+        return None, None
+    knob_ans, way_ans = answers["knob"], answers["way"]
+    knob = LABEL_KNOB.get(shield(knob_ans.get("choice"), knob_ans.get("probabilities"), questions["knob"]["criteria"]))
+    way = LABEL_WAY.get(shield(way_ans.get("choice"), way_ans.get("probabilities"), questions["way"]["criteria"]))
+    if not knob or not way:
+        return None, None
+    return apply_step(policy, knob, way, death)
+
+
+def _write_death(path, death):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(death) + "\n")
+
+
+def _fill_edit(path, edit):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return
+    last = json.loads(lines[-1])
+    last["edit"] = edit
+    lines[-1] = json.dumps(last)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def record_death(agent, snap, runs=None):
+    """Write the death line, then ask Laya. The policy file changes only when the edit lands."""
+    global RUN_ID
+    runs = Path(runs) if runs is not None else RUNS
+    if not RUN_ID:
+        begin_life()
+    policy = copy.deepcopy(POLICY)
+    death = {
+        "kind": "death",
+        "run": RUN_ID,
+        "policy": policy["id"],
+        "time": float(snap.get("time") or 0),
+        "level": int(snap.get("level") or 1),
+        "item": snap.get("item") or "",
+        "full_bond": bool(snap.get("full_bond")) or _full_bond(snap.get("moves") or []),
+        "cause": cause_of(snap),
+        "last_hp": snap.get("last_hp") or [],
+        "moves": snap.get("moves") or [],
+        "stats": snap.get("stats") or {},
+        "edit": None,
+    }
+    path = runs / "deaths.jsonl"
+    _write_death(path, death)
+    new_policy, edit = ask_laya(agent, death, policy)
+    if edit:
+        set_policy(new_policy)
+        save_policy(runs / "policy.json", new_policy)
+        _fill_edit(path, edit)
+    print("[bot] death", death["cause"], edit or "unchanged")
+    begin_life()
+    return {"edit": edit, "policy": POLICY["id"]}
 
 
 def _check():
@@ -816,6 +1158,96 @@ def _check():
             {"kind": "thief", "dx": 0, "dy": -120, "dist": 120},
         ],
     }) == "move north"
+
+    held = {"cause": "contact:Pidgey", "time": 10, "item": "luckyegg", "moves": [], "full_bond": False}
+    base = default_policy()
+    assert knobs_for(held, base) == ["kite", "contact_gap"]
+    melee = dict(held, moves=[{"active": True, "kind": "melee", "reach": 48}])
+    assert knobs_for(melee, base) == ["kite", "contact_gap", "short"]
+    assert knobs_for(dict(held, cause="trap:poison"), base) == ["trap_weight"]
+    assert knobs_for(dict(held, cause="hazard:zone"), base) == ["trap_weight"]
+    assert knobs_for(dict(held, cause="liquid"), base) == ["trap_weight"]
+    assert knobs_for(dict(held, cause="crowd"), base) == ["kite", "contact_gap"]
+    assert "shot_weight" not in knobs_for(dict(held, cause="shot"), base)
+    early = {"cause": "unseen", "time": 10, "item": "", "moves": [], "full_bond": False}
+    assert knobs_for(early, base) == ["egg_until"]
+    late_egg = dict(early, time=700, item="luckyegg")
+    assert knobs_for(late_egg, base) == ["egg_until", "item_late"]
+    assert knobs_for(dict(early, time=700, item="choiceband"), base) == ["item_late"]
+    assert knobs_for(dict(early, item="luckyegg", full_bond=True), base) == ["stat_order"]
+    assert knobs_for(dict(early, item="luckyegg"), base) == []
+    assert cause_of({"liquid": "lava"}) == "liquid"
+    assert cause_of({"traps": [{"kind": "poison", "dx": 10, "dy": 0, "r": 74}]}) == "trap:poison"
+    assert cause_of({"r": 14, "enemies": [{"name": "Pidgey", "dist": 20, "r": 16}]}) == "contact:Pidgey"
+    crowd = {"r": 14, "enemies": [{"name": "Pidgey", "dist": 50, "r": 14}] * 4}
+    assert cause_of(crowd) == "crowd"
+    assert cause_of({"r": 14, "enemies": [{"name": "Pidgey", "dist": 200, "r": 14}]}) == "unseen"
+    grown, edit = apply_step(base, "kite", "increase", {})
+    assert edit == {"knob": "kite", "from": 150, "to": 160} and grown["id"] == "p1" and grown["parent"] == "p0"
+    low = default_policy()
+    low["kite"] = 80
+    assert apply_step(low, "kite", "decrease", {}) == (None, None)
+    slid, edit = apply_step(base, "stat_order", "later", {"stats": {}})
+    assert edit["to"][:2] == ["xp", "rgn"] and slid["stat_order"][0] == "xp"
+    assert apply_step(base, "stat_order", "earlier", {"stats": {}}) == (None, None)
+    swapped, edit = apply_step(base, "item_late", "later", {})
+    assert edit["to"] == ["lifeorb", "choiceband"] and swapped["item_late"][0] == "lifeorb"
+    egg_policy = default_policy()
+    egg_policy["egg_until"] = 100
+    set_policy(egg_policy)
+    assert item_choice([{"item": "luckyegg"}, {"item": "choiceband"}], 120) == 1
+    atk_first = default_policy()
+    atk_first["stat_order"] = ["atk", "rgn", "xp", "hp", "cd", "def", "mag", "spd"]
+    set_policy(atk_first)
+    assert level_choice([
+        {"label": "Potencia", "stat": "atk"},
+        {"label": "Aprendizaje", "stat": "xp"},
+    ], fused) == 0
+    set_policy(default_policy())
+
+    class Pick:
+        def predict(self, text, qs):
+            assert "contact:Pidgey" in text and "kite distance" in qs["knob"]["criteria"]
+            assert "increase it" in qs["way"]["criteria"]
+            return {"answers": {
+                "knob": {"choice": "kite distance", "probabilities": {}},
+                "way": {"choice": "increase it", "probabilities": {}},
+            }}
+
+    class Boom:
+        def predict(self, text, qs):
+            raise RuntimeError("down")
+
+    class Silent:
+        def predict(self, text, qs):
+            raise AssertionError("no question on an empty knob list")
+
+    class Empty:
+        def predict(self, text, qs):
+            return {"answers": {}}
+
+    quiet = {"cause": "unseen", "time": 10, "item": "luckyegg", "moves": [], "full_bond": False}
+    assert ask_laya(Silent(), quiet, default_policy()) == (None, None)
+    assert ask_laya(Empty(), held, default_policy()) == (None, None)
+    asked, edit = ask_laya(Pick(), held, default_policy())
+    assert edit["to"] == 160 and asked["kite"] == 160
+
+    import tempfile
+    snap = {"time": 10, "item": "luckyegg", "r": 14, "enemies": [{"name": "Pidgey", "dist": 20, "r": 16}], "moves": []}
+    failed = Path(tempfile.mkdtemp())
+    set_policy(default_policy())
+    missed = record_death(Boom(), snap, failed)
+    assert missed["edit"] is None and missed["policy"] == "p0"
+    assert json.loads((failed / "deaths.jsonl").read_text().strip())["edit"] is None
+    assert not (failed / "policy.json").exists()
+    landed = Path(tempfile.mkdtemp())
+    set_policy(default_policy())
+    hit = record_death(Pick(), snap, landed)
+    assert hit["edit"]["knob"] == "kite" and hit["policy"] == "p1"
+    saved = json.loads((landed / "policy.json").read_text())
+    assert saved["kite"] == 160 and saved["parent"] == "p0"
+    assert json.loads((landed / "deaths.jsonl").read_text().strip())["edit"]["to"] == 160
+    set_policy(default_policy())
     print("ok")
 
 

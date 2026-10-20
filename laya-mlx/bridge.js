@@ -34,6 +34,10 @@
   var trail = [];
   var spot = null;
   var nudge = '';
+  var deathSent = false;
+  var deathPending = false;
+  var lastSnap = null;
+  var hpTrail = [];
 
   function key(type, code) {
     window.dispatchEvent(new KeyboardEvent(type, {
@@ -473,31 +477,80 @@
     if (cmd.action === 'move' && phase() === 'playing') holdMove(cmd.label);
   }
 
+  function deathBody() {
+    var pl = G.Game.player;
+    var snap = JSON.parse(JSON.stringify(lastSnap || snapshot('playing')));
+    if (pl) {
+      snap.time = G.Game.st ? G.Game.st.time : (snap.time || 0);
+      snap.level = pl.level;
+      snap.item = pl.item || '';
+      snap.full_bond = (pl.slots || []).some(function (g) { return g.length >= 4; });
+      snap.stats = pl.statsTaken || {};
+      snap.moves = knownMoves(pl);
+      snap.hp = 0;
+    }
+    snap.last_hp = hpTrail.slice();
+    return snap;
+  }
+
+  function postDeath() {
+    if (deathPending || deathSent) return;
+    deathPending = true;
+    fetch('/death', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(deathBody())
+    }).then(function (r) {
+      if (!r.ok) throw new Error('death ' + r.status);
+      return r.json();
+    }).catch(function (e) {
+      console.warn('[bot]', e);
+    }).then(function () {
+      deathPending = false;
+      deathSent = true;
+    });
+  }
+
   function tick() {
     var ph = phase();
-    if (ph === 'playing') { cardSent = ''; useBestAttack(); trackPos(); wander(); }
-    else { trail = []; spot = null; nudge = ''; }
+    var pl = G.Game && G.Game.player;
+    if (ph === 'playing' && pl && !pl.dead && deathSent) {
+      deathSent = false;
+      hpTrail = [];
+      lastSnap = null;
+    }
+    if (ph === 'playing' && pl && !pl.dead) { cardSent = ''; useBestAttack(); trackPos(); wander(); }
+    else if (ph !== 'playing') { trail = []; spot = null; nudge = ''; }
     if (ph === 'cinematic') { tap('Space'); return; }
     if (ph === 'over') {
+      releaseMove();
+      if (!deathSent) { postDeath(); return; }
       if (overHandled) return;
       overHandled = true;
-      releaseMove();
       var btn = document.getElementById('btn-again');
       if (btn) btn.click();
       try { G.Flow.play(); } catch (e) { console.error('[bot]', e); }
+      return;
+    }
+    if (pl && pl.dead) {
+      releaseMove();
+      postDeath();
       return;
     }
     overHandled = false;
     if (ph !== 'playing' && ph !== 'levelup' && ph !== 'item' && ph !== 'bond') return;
     var box = cardBox(ph);
     if (ph !== 'playing' && box && box.classList.contains('guard')) { releaseMove(); return; }
-    var pl = G.Game.player;
-    if (ph === 'playing' && pl && Date.now() - mark > 2000) {
+    if (ph === 'playing' && pl && !pl.dead && Date.now() - mark > 2000) {
       mark = Date.now();
+      hpTrail.push({ t: Math.round(G.Game.st.time), hp: Math.round(pl.hp) });
+      var cut = G.Game.st.time - 5;
+      hpTrail = hpTrail.filter(function (p) { return p.t >= cut; });
       console.log('[bot] at', Math.round(pl.x), Math.round(pl.y), 'hp', Math.round(pl.hp));
     }
     if (busy) return;
     var snap = snapshot(ph);
+    if (ph === 'playing' && pl && !pl.dead) lastSnap = snap;
     var sent = performance.now();
     busy = true;
     fetch('/decide', {

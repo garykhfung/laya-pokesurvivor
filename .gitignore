@@ -1,6 +1,9 @@
 # The game is its own git checkout. Update it there; this repo does not track it.
 pokesurvivor/
 
+# Death lines and the policy the next life reads. Written on this machine only.
+runs/
+
 __pycache__/
 *.pyc
 .venv/
