@@ -145,6 +145,7 @@
       g.forEach(function (m, mi) {
         out.push({
           name: m.name, id: m.id, kind: m.kind, type: m.type, lvl: m.lvl,
+          max: m.maxLvl || (m.def && m.def.maxLvl) || 5, evolved: !!m.evolved,
           slot: si, lead: mi === 0, active: si === pl.active, group: g.length,
           reach: hitReach(m)
         });
@@ -180,22 +181,24 @@
     return (g || []).some(function (m) { return m.kind !== 'buff'; });
   }
 
-  /** Highest-level attack slot. A full bond stays on. A buff-only slot is never selected. */
+  /** The short or long attack, whichever this run asked for. A buff-only slot is never selected. */
   function useBestAttack() {
     var pl = G.Game.player;
     if (!pl || !pl.slots || !pl.slots.length) return;
-    var merged = -1;
-    pl.slots.forEach(function (g, i) { if (g.length >= 4 && hasAttack(g)) merged = i; });
-    if (merged >= 0) {
-      if (merged !== pl.active) tap('Digit' + (merged + 1));
-      return;
-    }
-    var bestSlot = -1, bestLvl = -1;
+    var wantShort = tune.range === 'short';
+    var bestSlot = -1, bestKey = 0, bestLvl = -1;
     pl.slots.forEach(function (g, i) {
       if (!hasAttack(g)) return;
+      var reach = 0, lvl = 0;
       g.forEach(function (m) {
-        if (m.kind !== 'buff' && m.lvl > bestLvl) { bestLvl = m.lvl; bestSlot = i; }
+        if (m.kind === 'buff') return;
+        reach = Math.max(reach, hitReach(m));
+        if (m.lvl > lvl) lvl = m.lvl;
       });
+      var key = wantShort ? (reach || 9999) : -reach;
+      if (bestSlot < 0 || key < bestKey || (key === bestKey && lvl > bestLvl)) {
+        bestKey = key; bestLvl = lvl; bestSlot = i;
+      }
     });
     if (bestSlot >= 0 && bestSlot !== pl.active) tap('Digit' + (bestSlot + 1));
   }
@@ -359,6 +362,19 @@
         return { kind: ['poison', 'sticky', 'boom'][p.kind] || 'trap', dx: Math.round(dx), dy: Math.round(dy), r: TRAP_R };
       });
     }
+    var shots = [];
+    if (pl && G.Projectiles && G.Projectiles.all) {
+      shots = G.Projectiles.all().filter(function (p) {
+        return p && !p.friendly && !p.orb;
+      }).map(function (p) {
+        var dx = p.x - pl.x, dy = p.y - pl.y;
+        return {
+          dx: Math.round(dx), dy: Math.round(dy),
+          vx: Math.round(p.vx || 0), vy: Math.round(p.vy || 0),
+          r: Math.round(p.r || 8), dist: Math.round(Math.hypot(dx, dy))
+        };
+      }).filter(function (p) { return p.dist < 340; }).sort(function (a, b) { return a.dist - b.dist; }).slice(0, 12);
+    }
     var goals = [];
     if (pl && G.Rift && G.Rift.rift && !G.Rift.arena) {
       var rdx = G.Rift.rift.x - pl.x, rdy = G.Rift.rift.y - pl.y;
@@ -394,17 +410,248 @@
       blocks: pl ? blocksNear(pl) : [],
       traps: traps,
       hazards: hazards,
+      shots: shots,
       goals: goals,
       safe: pl && ph === 'playing' ? safeDirs(pl) : [],
       nudge: ph === 'playing' ? nudge : '',
       trail: ph === 'playing' ? posTrail() : [],
       cards: ph === 'playing' || ph === 'cinematic' || ph === 'over' ? [] : cardsOf(ph),
       moves: pl ? knownMoves(pl) : [],
-      bond: ph === 'bond' ? bondInfo(pl) : null
+      bond: ph === 'bond' ? bondInfo(pl) : null,
+      tune: { dodge: tune.dodge, range: tune.range, item: tune.item }
     };
   }
 
   var logKey = '';
+  var tune = { dodge: 150, range: 'long', item: 'luckyegg', randomMon: false };
+  var runSetup = { dex: 0, shiny: false, levels: {} };
+  try {
+    var kept = JSON.parse(localStorage.getItem('laya.tune') || 'null');
+    if (kept && typeof kept === 'object') {
+      if (kept.dodge) tune.dodge = Math.max(40, Math.min(400, kept.dodge | 0));
+      if (kept.range === 'short' || kept.range === 'long') tune.range = kept.range;
+      if (kept.item) tune.item = kept.item;
+      if (kept.randomMon) tune.randomMon = true;
+    }
+  } catch (e) { /* keep the defaults */ }
+
+  function saveTune() {
+    try { localStorage.setItem('laya.tune', JSON.stringify(tune)); } catch (e) { /* private mode */ }
+  }
+
+  function mountTune(panel) {
+    var box = panel.querySelector('.tune');
+    if (!box || box.childNodes.length) return;
+    var field = 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin:4px 0';
+    var control = 'width:132px;background:#12203a;color:#e8f0ff;border:1px solid #6ea8ff;border-radius:6px;padding:2px 6px';
+    box.innerHTML = '<div style="color:#9ec0ff;font-size:11px">Each run</div>' +
+      '<label style="' + field + '">Dodge distance<input class="dodge" type="number" min="40" max="400" step="10" style="' + control + '"></label>' +
+      '<label style="' + field + '">Attack range<select class="range" style="' + control + '">' +
+      '<option value="short">Short</option><option value="long">Long</option></select></label>' +
+      '<label style="' + field + '">Item priority<select class="item" style="' + control + '"></select></label>' +
+      '<button type="button" class="rand" style="width:100%;margin-top:4px;background:#12203a;color:#e8f0ff;border:1px solid #6ea8ff;border-radius:6px;padding:4px 6px"></button>';
+    var item = box.querySelector('.item');
+    ((G.Items && G.Items.LIST) || []).forEach(function (it) {
+      var opt = document.createElement('option');
+      opt.value = it.id;
+      opt.textContent = (G.T && G.T(it.name)) || it.name;
+      item.appendChild(opt);
+    });
+    box.querySelector('.dodge').value = tune.dodge;
+    box.querySelector('.range').value = tune.range;
+    if (item.querySelector('option[value="' + tune.item + '"]')) item.value = tune.item;
+    box.addEventListener('change', function (ev) {
+      var t = ev.target;
+      if (t.classList.contains('dodge')) tune.dodge = Math.max(40, Math.min(400, t.value | 0 || 150));
+      else if (t.classList.contains('range')) tune.range = t.value === 'short' ? 'short' : 'long';
+      else if (t.classList.contains('item')) tune.item = t.value;
+      saveTune();
+    });
+    var rand = box.querySelector('.rand');
+    function showRand() { rand.textContent = tune.randomMon ? 'Random Pokémon: on' : 'Random Pokémon'; }
+    showRand();
+    rand.onclick = function () {
+      tune.randomMon = !tune.randomMon;
+      saveTune();
+      showRand();
+    };
+  }
+
+  function ensurePanel() {
+    var panel = document.getElementById('bot-log');
+    if (panel) return panel;
+    panel = document.createElement('aside');
+    panel.id = 'bot-log';
+    panel.setAttribute('style', [
+      'position:fixed', 'top:12px', 'right:12px', 'z-index:50',
+      'width:min(320px,34vw)', 'max-height:calc(100dvh - 24px)', 'overflow:auto',
+      'padding:12px 14px', 'border-radius:12px', 'pointer-events:auto',
+      'background:rgba(8,16,36,.92)', 'border:2px solid #6ea8ff',
+      'color:#e8f0ff', 'font:13px/1.35 sans-serif', 'text-shadow:none'
+    ].join(';'));
+    panel.innerHTML = '<b style="font-size:15px">Laya</b>' +
+      '<div class="tune" style="margin-top:8px;color:#c5d4ee;font-size:12px"></div>' +
+      '<div class="v" style="margin-top:8px;color:#c5d4ee;font-size:12px;line-height:1.45"></div>' +
+      '<div style="margin-top:8px;color:#9ec0ff;font-size:11px">Question</div>' +
+      '<p class="q" style="margin:2px 0 4px"></p>' +
+      '<p class="s" style="margin:0 0 8px;color:#c5d4ee"></p>' +
+      '<div style="color:#9ec0ff;font-size:11px">Response</div>' +
+      '<p class="a" style="margin:2px 0 6px;font-weight:700"></p>' +
+      '<div style="color:#9ec0ff;font-size:11px">Response time</div>' +
+      '<p class="t" style="margin:2px 0 8px;font-weight:700"></p>' +
+      '<div class="h"></div>';
+    document.body.appendChild(panel);
+    mountTune(panel);
+    return panel;
+  }
+
+  function pct(v) { return Math.round(v * 100) + '%'; }
+
+  function clock(s) {
+    s = Math.max(0, Math.round(s || 0));
+    return Math.floor(s / 60) + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+  }
+
+  var records = {};
+  try { records = JSON.parse(localStorage.getItem('laya.records') || '{}') || {}; } catch (e) { records = {}; }
+
+  function saveRecords() {
+    try { localStorage.setItem('laya.records', JSON.stringify(records)); } catch (e) { /* private mode */ }
+  }
+
+  function pullRecords() {
+    fetch('/records').then(function (r) { return r.ok ? r.json() : null; }).then(function (book) {
+      if (!book || typeof book !== 'object') return;
+      records = book;
+      saveRecords();
+      paintVars();
+    }).catch(function () {});
+  }
+
+  function keepLocal(report) {
+    var key = String(report.dex);
+    var row = records[key] || { name: report.name, dex: report.dex, played: 0, best: 0, bestRun: null };
+    row.name = report.name;
+    row.played = (row.played || 0) + 1;
+    if ((report.time || 0) >= (row.best || 0)) {
+      row.best = report.time || 0;
+      row.bestRun = report;
+    }
+    records[key] = row;
+    saveRecords();
+  }
+
+  function titled(text) { return (G.T && G.T(text)) || text; }
+
+  function randomLevels() {
+    var levels = {};
+    ((G.Upgrades && G.Upgrades.LIST) || []).forEach(function (u) {
+      levels[u.id] = (Math.random() * (u.max + 1)) | 0;
+    });
+    return levels;
+  }
+
+  function upgradeLine() {
+    return ((G.Upgrades && G.Upgrades.LIST) || []).filter(function (u) {
+      return runSetup.levels && runSetup.levels[u.id];
+    }).map(function (u) { return titled(u.name) + ' ' + runSetup.levels[u.id]; });
+  }
+
+  function rememberRun() {
+    var pl = G.Game && G.Game.player;
+    if (!pl || !pl.mon) return;
+    var statNames = (G.LevelUp && G.LevelUp.STATS) || [];
+    var report = {
+      dex: pl.dex,
+      name: pl.mon.name,
+      shiny: !!pl.shiny,
+      time: Math.round((G.Game.st && G.Game.st.time) || 0),
+      level: pl.level,
+      kills: pl.kills || 0,
+      bosses: pl.bosses || 0,
+      item: (pl.item && G.Items && G.Items.BY[pl.item]) ? titled(G.Items.BY[pl.item].name) : '',
+      atk: Math.round(pl.atkFor({ cat: 'physical' }) * 100) / 100,
+      spa: Math.round(pl.atkFor({ cat: 'special' }) * 100) / 100,
+      spd: Math.round(pl.spd),
+      hp: Math.round(pl.maxHp),
+      stats: Object.keys(pl.statsTaken || {}).map(function (id) {
+        var s = statNames.filter(function (x) { return x.id === id; })[0];
+        return titled(s ? s.title : id) + ' ×' + pl.statsTaken[id];
+      }),
+      moves: (pl.moves || []).map(function (m) {
+        return (m.name || m.id) + ' ' + m.lvl + (m.evolved ? ' evolved' : '');
+      }),
+      upgrades: upgradeLine()
+    };
+    fetch('/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(report)
+    }).then(function (r) {
+      if (!r.ok) throw new Error('record ' + r.status);
+      return r.json();
+    }).then(function (book) {
+      if (book && typeof book === 'object') { records = book; saveRecords(); paintVars(); }
+    }).catch(function () { keepLocal(report); paintVars(); });
+  }
+
+  // Live numbers for this run. The knobs above the list are what changes between runs.
+  function paintVars() {
+    var panel = document.getElementById('bot-log');
+    var pl = window.G && G.Game && G.Game.player;
+    if (!pl) {
+      if (panel) panel.querySelector('.v').textContent = '';
+      return;
+    }
+    panel = ensurePanel();
+    mountTune(panel);
+    var t = (G.Game.st && G.Game.st.time) || 0;
+    var atk = pl.atkFor({ cat: 'physical' });
+    var spa = pl.atkFor({ cat: 'special' });
+    var cd = pl.cdMul < 0.995 ? '−' + pct(1 - pl.cdMul) : '0%';
+    var it = pl.item && G.Items && G.Items.BY[pl.item];
+    var lines = [
+      'This run',
+      'HP ' + Math.round(pl.hp) + '/' + Math.round(pl.maxHp) + '  Lv ' + pl.level + '  ' + Math.round(t) + 's',
+      pl.kills + ' KOs  ' + pl.bosses + ' bosses  ' + pl.coins + ' coins',
+      'Atk ×' + atk.toFixed(2) + '  Sp ×' + spa.toFixed(2) + '  Spd ' + Math.round(pl.spd),
+      'Crit ' + pct(pl.critChance || 0) + '  DR ' + pct(pl.reduction || 0) + '  CD ' + cd + '  Regen ' + (pl.regen || 0).toFixed(1) + '/s',
+      'XP ×' + (pl.xpMul || 1).toFixed(2) + '  Magnet ' + Math.round(pl.magnet || 0),
+      it ? 'Item ' + it.name : 'No item'
+    ];
+    var taken = pl.statsTaken || {};
+    var stats = (G.LevelUp && G.LevelUp.STATS) || [];
+    var cards = Object.keys(taken).map(function (id) {
+      var s = stats.filter(function (x) { return x.id === id; })[0];
+      return (s ? s.title : id) + ' ×' + taken[id];
+    });
+    if (cards.length) lines.push(cards.join('  '));
+    var moves = (pl.moves || []).filter(function (m) { return m.kind !== 'buff'; }).map(function (m) {
+      return (m.name || m.id) + ' ' + m.lvl;
+    });
+    if (moves.length) lines.push(moves.join(' · '));
+    var ups = upgradeLine();
+    if (ups.length) lines.push(ups.join('  '));
+    var rec = records[String(pl.dex)];
+    if (rec) {
+      var best = rec.bestRun || {};
+      lines.push('', 'Record', 'Played ' + rec.played + '  Best ' + clock(rec.best));
+      lines.push('Best run Lv ' + (best.level || 1) + (best.item ? '  ' + best.item : ''));
+      if (best.moves && best.moves.length) lines.push(best.moves.join(' · '));
+      if (best.stats && best.stats.length) lines.push(best.stats.join('  '));
+      if (best.upgrades && best.upgrades.length) lines.push(best.upgrades.join('  '));
+      if (best.hp) lines.push('Atk ×' + best.atk + '  Sp ×' + best.spa + '  Spd ' + best.spd + '  HP ' + best.hp);
+    }
+    var box = panel.querySelector('.v');
+    box.textContent = '';
+    lines.forEach(function (line) {
+      var row = document.createElement('div');
+      if (!line) row.style.height = '6px';
+      else if (line === 'This run' || line === 'Record') row.style.cssText = 'color:#9ec0ff;font-size:11px';
+      row.textContent = line;
+      box.appendChild(row);
+    });
+  }
 
   function showNote(cmd, ms) {
     if (!cmd || cmd.action === 'wait') return;
@@ -414,28 +661,7 @@
       result: cmd.label || '',
       scene: ''
     };
-    var panel = document.getElementById('bot-log');
-    if (!panel) {
-      panel = document.createElement('aside');
-      panel.id = 'bot-log';
-      panel.setAttribute('style', [
-        'position:fixed', 'top:12px', 'right:12px', 'z-index:50',
-        'width:min(320px,34vw)', 'max-height:calc(100dvh - 24px)', 'overflow:auto',
-        'padding:12px 14px', 'border-radius:12px', 'pointer-events:auto',
-        'background:rgba(8,16,36,.92)', 'border:2px solid #6ea8ff',
-        'color:#e8f0ff', 'font:13px/1.35 sans-serif', 'text-shadow:none'
-      ].join(';'));
-      panel.innerHTML = '<b style="font-size:15px">Laya</b>' +
-        '<div style="margin-top:8px;color:#9ec0ff;font-size:11px">Question</div>' +
-        '<p class="q" style="margin:2px 0 4px"></p>' +
-        '<p class="s" style="margin:0 0 8px;color:#c5d4ee"></p>' +
-        '<div style="color:#9ec0ff;font-size:11px">Response</div>' +
-        '<p class="a" style="margin:2px 0 6px;font-weight:700"></p>' +
-        '<div style="color:#9ec0ff;font-size:11px">Response time</div>' +
-        '<p class="t" style="margin:2px 0 8px;font-weight:700"></p>' +
-        '<div class="h"></div>';
-      document.body.appendChild(panel);
-    }
+    var panel = ensurePanel();
     panel.querySelector('.q').textContent = note.question || '';
     panel.querySelector('.s').textContent = note.scene || '';
     var answer = note.result || '';
@@ -474,17 +700,27 @@
   }
 
   function tick() {
+    paintVars();
     var ph = phase();
     if (ph === 'playing') { cardSent = ''; useBestAttack(); trackPos(); wander(); }
     else { trail = []; spot = null; nudge = ''; }
     if (ph === 'cinematic') { tap('Space'); return; }
     if (ph === 'over') {
+      // The distortion world is still this run. Falling there sends you back
+      // to the map; it does not end the run. A game-over screen during that
+      // trip used to click "play again" and start a new one.
+      if (G.Rift && G.Rift.inArena) return;
       if (overHandled) return;
       overHandled = true;
+      rememberRun();
       releaseMove();
       var btn = document.getElementById('btn-again');
       if (btn) btn.click();
-      try { G.Flow.play(); } catch (e) { console.error('[bot]', e); }
+      try {
+        var next = tune.randomMon ? randomMon() : null;
+        if (next) begin(next, runSetup.shiny, randomLevels());
+        else G.Flow.play();
+      } catch (e) { console.error('[bot]', e); }
       return;
     }
     overHandled = false;
@@ -525,7 +761,15 @@
     return starts.length === 1 ? starts[0] : null;
   }
 
+  function randomMon() {
+    var pool = (G.DEX || []).filter(function (m) {
+      return G.SPRITE_META && G.SPRITE_META[m.dex] && !m.leg && m.dex !== runSetup.dex;
+    });
+    return pool.length ? pool[(Math.random() * pool.length) | 0] : null;
+  }
+
   function begin(mon, shiny, levels) {
+    runSetup = { dex: mon.dex, shiny: !!shiny, levels: levels || {} };
     G.DB.playAsGuest();
     var save = G.DB.save;
     save.starter = mon.dex;
@@ -564,6 +808,7 @@
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px">' +
       '<label class="sub" style="display:flex;gap:8px;align-items:center;margin:0">' +
       '<input id="bot-shiny" type="checkbox"> Shiny</label>' +
+      '<button id="bot-mon-rand" class="btn small" type="button">Random Pokémon</button>' +
       '<button id="bot-mon-ok" class="btn gold" type="button">Next</button></div></div>'
     );
     var input = document.getElementById('bot-mon');
@@ -578,7 +823,17 @@
     }
     input.addEventListener('input', syncShiny);
     syncShiny();
+    document.getElementById('bot-mon-rand').onclick = function () {
+      var mon = randomMon();
+      if (!mon) return;
+      tune.randomMon = true;
+      saveTune();
+      scr.remove();
+      then(mon, shinyBox.checked, randomLevels());
+    };
     function go() {
+      tune.randomMon = false;
+      saveTune();
       var mon = resolveMon(input.value);
       if (!mon) { err.textContent = 'No single Pokémon matches that. Try the full name or its number.'; return; }
       var shiny = shinyBox.checked;
@@ -653,6 +908,7 @@
     if (boot && !boot.classList.contains('hidden')) { setTimeout(arm, 50); return; }
     var tapEl = document.getElementById('tap-start');
     if (tapEl && !tapEl.classList.contains('hidden')) { tapEl.click(); setTimeout(arm, 50); return; }
+    pullRecords();
     ask(function (mon, shiny, levels) {
       if (G.Game.state === 'ui') {
         try { begin(mon, shiny, levels); }

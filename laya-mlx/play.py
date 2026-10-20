@@ -25,9 +25,45 @@ from decide import decide, load_agent
 
 ROOT = Path(__file__).resolve().parent.parent / "pokesurvivor"
 BOT = Path(__file__).resolve().parent
+RECORDS = BOT / "records.json"
 PORT = 8765
 AGENT = None
 LOCK = threading.Lock()
+
+
+def note_run(report, book=None):
+    """One finished run. played goes up; best keeps the longer time and that run's build."""
+    if book is None:
+        book = json.loads(RECORDS.read_text(encoding="utf-8")) if RECORDS.is_file() else {}
+    if not isinstance(book, dict):
+        book = {}
+    dex = str(int(report["dex"]))
+    row = book.get(dex) if isinstance(book.get(dex), dict) else {}
+    played = int(row.get("played") or 0) + 1
+    best = int(row.get("best") or 0)
+    best_run = row.get("bestRun")
+    time = int(report.get("time") or 0)
+    if time >= best:
+        best = time
+        best_run = report
+    book[dex] = {
+        "name": report.get("name") or row.get("name") or dex,
+        "dex": int(dex),
+        "played": played,
+        "best": best,
+        "bestRun": best_run,
+    }
+    return book
+
+
+def _check_records():
+    book = note_run({"dex": 1, "name": "Bulbasaur", "time": 10, "level": 2, "moves": ["Tackle 1"]}, {})
+    assert book["1"]["played"] == 1 and book["1"]["best"] == 10, book
+    book = note_run({"dex": 1, "name": "Bulbasaur", "time": 5, "level": 1, "moves": []}, book)
+    assert book["1"]["played"] == 2 and book["1"]["best"] == 10 and book["1"]["bestRun"]["level"] == 2, book
+    book = note_run({"dex": 1, "name": "Bulbasaur", "time": 20, "level": 4, "moves": ["Tackle 3"]}, book)
+    assert book["1"]["best"] == 20 and book["1"]["bestRun"]["moves"] == ["Tackle 3"], book
+    print("records ok")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -54,6 +90,10 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/__bot.js":
             self._bytes(200, (BOT / "bridge.js").read_bytes(), "text/javascript; charset=utf-8")
             return
+        if path == "/records":
+            body = RECORDS.read_text(encoding="utf-8") if RECORDS.is_file() else "{}"
+            self._bytes(200, body, "application/json")
+            return
         if path in ("/", "/dev.html"):
             html = (ROOT / "dev.html").read_text(encoding="utf-8")
             html = html.replace("</body>", '<script defer src="/__bot.js"></script>\n</body>', 1)
@@ -62,7 +102,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/decide":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/decide", "/record"):
             self.send_error(404)
             return
         n = int(self.headers.get("Content-Length") or 0)
@@ -71,6 +112,12 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             snap = json.loads(self.rfile.read(n).decode("utf-8"))
+            if path == "/record":
+                with LOCK:
+                    book = note_run(snap)
+                    RECORDS.write_text(json.dumps(book, indent=2) + "\n", encoding="utf-8")
+                self._bytes(200, json.dumps(book), "application/json")
+                return
             with LOCK:
                 out = decide(AGENT, snap)
         except Exception as e:
@@ -146,4 +193,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--check" in sys.argv:
+        _check_records()
+    else:
+        main()
