@@ -11,9 +11,10 @@ Two folders, two projects:
 
 ## Run
 
-Needs an Apple Silicon Mac, Python 3.11 or newer, and Chrome. Use a separate virtualenv so this does not change any other MLX install.
+Needs an Apple Silicon Mac, Python 3.11 or newer, and Chrome. Clone the game once, next to `laya-mlx/`, then use a separate virtualenv so this does not change any other MLX install.
 
 ```bash
+git clone https://github.com/garykhfung/pokesurvivor.git pokesurvivor
 python3 -m venv .venv
 .venv/bin/pip install -r laya-mlx/requirements.txt
 .venv/bin/python laya-mlx/play.py
