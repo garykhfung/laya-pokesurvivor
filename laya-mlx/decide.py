@@ -4,6 +4,7 @@ play.py posts each snapshot from bridge.js here. Movement is a fixed rule, and
 so are the usual level-up, bond, and item picks. Laya is asked only when a card
 is on screen and no rule takes it. The model sees one English paragraph from
 describe(); shield() then keeps its answer inside the labels that were offered.
+What those rules do is written up in README.md under "How it plays".
 
 Running this file checks those rules and does not load the model:
 
