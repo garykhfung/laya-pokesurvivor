@@ -21,7 +21,7 @@ python3 -m venv .venv
 .venv/bin/python laya-mlx/play.py 25
 ```
 
-That serves `pokesurvivor/dev.html` at `http://127.0.0.1:8765` and opens it in a throwaway Chrome profile. The page asks which Pokémon to play and whether it is shiny, then which permanent stats to start with. Those stats are not bought with coins. A name on the command line only fills the first field. While the run is going, a panel on the right shows each decision: the question, the situation, and whether a rule or Laya answered. The Laya checkpoint downloads once into the Hugging Face cache.
+That serves `pokesurvivor/dev.html` at `http://127.0.0.1:8765` and opens it in a throwaway Chrome profile. The page asks which Pokémon to play and whether it is shiny, then which permanent stats to start with. Those stats are not bought with coins. A name on the command line only fills the first field. While the run is going, a panel on the right shows each decision: the question, the response, and how long that response took. The Laya checkpoint downloads once into the Hugging Face cache.
 
 `python laya-mlx/decide.py` checks the card and movement rules without loading the model.
 

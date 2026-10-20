@@ -406,24 +406,33 @@
 
   var logKey = '';
 
-  function showNote(cmd) {
-    var note = cmd && cmd.note;
-    if (!note) return;
+  function showNote(cmd, ms) {
+    if (!cmd || cmd.action === 'wait') return;
+    var note = cmd.note || {
+      source: 'rule',
+      question: cmd.action === 'card' ? 'Which option should the Pokémon take?' : 'Which way should the Pokémon move to stay alive?',
+      result: cmd.label || '',
+      scene: ''
+    };
     var panel = document.getElementById('bot-log');
     if (!panel) {
       panel = document.createElement('aside');
       panel.id = 'bot-log';
       panel.setAttribute('style', [
-        'position:fixed', 'top:12px', 'right:12px', 'z-index:35',
+        'position:fixed', 'top:12px', 'right:12px', 'z-index:50',
         'width:min(320px,34vw)', 'max-height:calc(100dvh - 24px)', 'overflow:auto',
         'padding:12px 14px', 'border-radius:12px', 'pointer-events:auto',
         'background:rgba(8,16,36,.92)', 'border:2px solid #6ea8ff',
         'color:#e8f0ff', 'font:13px/1.35 sans-serif', 'text-shadow:none'
       ].join(';'));
       panel.innerHTML = '<b style="font-size:15px">Laya</b>' +
-        '<p class="q" style="margin:8px 0 4px;color:#9ec0ff"></p>' +
+        '<div style="margin-top:8px;color:#9ec0ff;font-size:11px">Question</div>' +
+        '<p class="q" style="margin:2px 0 4px"></p>' +
         '<p class="s" style="margin:0 0 8px;color:#c5d4ee"></p>' +
-        '<p class="a" style="margin:0 0 8px;font-weight:700"></p>' +
+        '<div style="color:#9ec0ff;font-size:11px">Response</div>' +
+        '<p class="a" style="margin:2px 0 6px;font-weight:700"></p>' +
+        '<div style="color:#9ec0ff;font-size:11px">Response time</div>' +
+        '<p class="t" style="margin:2px 0 8px;font-weight:700"></p>' +
         '<div class="h"></div>';
       document.body.appendChild(panel);
     }
@@ -431,14 +440,16 @@
     panel.querySelector('.s').textContent = note.scene || '';
     var answer = note.result || '';
     if (note.raw) answer = note.raw + ' → ' + answer;
-    panel.querySelector('.a').textContent = (note.source === 'laya' ? 'Laya: ' : 'Rule: ') + answer;
+    var who = note.source === 'laya' ? 'Laya: ' : 'Rule: ';
+    panel.querySelector('.a').textContent = who + answer;
+    panel.querySelector('.t').textContent = ms + ' ms';
     var key = (note.source || '') + '|' + (note.question || '');
     if (cmd.action === 'card') key += '|' + (note.result || '') + '|' + (note.raw || '');
     if (key === logKey) return;
     logKey = key;
     var line = document.createElement('div');
     line.style.cssText = 'padding:4px 0;border-top:1px solid rgba(255,255,255,.12);color:#d5e2ff';
-    line.textContent = (note.source === 'laya' ? 'Laya: ' : 'Rule: ') + answer;
+    line.textContent = ms + ' ms · ' + who + answer;
     var hist = panel.querySelector('.h');
     hist.insertBefore(line, hist.firstChild);
     while (hist.children.length > 12) hist.removeChild(hist.lastChild);
@@ -487,6 +498,7 @@
     }
     if (busy) return;
     var snap = snapshot(ph);
+    var sent = performance.now();
     busy = true;
     fetch('/decide', {
       method: 'POST',
@@ -496,7 +508,7 @@
       if (!r.ok) throw new Error('decide ' + r.status);
       return r.json();
     }).then(function (cmd) {
-      showNote(cmd);
+      showNote(cmd, Math.round(performance.now() - sent));
       apply(cmd, snap);
     }).catch(function (e) {
       console.warn('[bot]', e);
@@ -548,10 +560,11 @@
       '<h2>Which Pokémon?</h2>' +
       '<p class="sub">Type a name or a Pokédex number</p>' +
       '<input id="bot-mon" class="field" placeholder="Pikachu or 25" autocomplete="off" spellcheck="false">' +
-      '<label class="sub" style="display:flex;gap:8px;align-items:center;margin:10px 0">' +
-      '<input id="bot-shiny" type="checkbox"> Shiny</label>' +
       '<p id="bot-mon-err" class="err"></p>' +
-      '<button id="bot-mon-ok" class="btn gold" type="button">Next</button></div>'
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px">' +
+      '<label class="sub" style="display:flex;gap:8px;align-items:center;margin:0">' +
+      '<input id="bot-shiny" type="checkbox"> Shiny</label>' +
+      '<button id="bot-mon-ok" class="btn gold" type="button">Next</button></div></div>'
     );
     var input = document.getElementById('bot-mon');
     var err = document.getElementById('bot-mon-err');
@@ -585,19 +598,30 @@
   function askStats(mon, shiny, then) {
     var list = (G.Upgrades && G.Upgrades.LIST) || [];
     var rows = list.map(function (u) {
-      return '<label class="sub" style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
+      return '<div class="sub" style="display:flex;gap:8px;align-items:center;margin:8px 0">' +
         '<span style="flex:1"><b>' + u.name + '</b> ' + u.unit + '</span>' +
+        '<button type="button" class="btn small" data-max="' + u.id + '">Max</button>' +
         '<input class="field" data-stat="' + u.id + '" type="number" min="0" max="' + u.max + '" value="0" style="width:76px">' +
-        '</label>';
+        '</div>';
     }).join('');
     var scr = screen(
       '<div class="box" style="width:min(480px,100%);max-height:calc(100dvh - 24px);overflow:auto">' +
       '<h2>Stats</h2>' +
       '<p class="sub">' + mon.name + (shiny ? ' shiny' : '') + '. Levels for this run. Coins stay untouched.</p>' +
+      '<button id="bot-stat-max" class="btn small" type="button">Max all</button>' +
       rows +
       '<p id="bot-stat-err" class="err"></p>' +
       '<button id="bot-stat-ok" class="btn gold" type="button">Play</button></div>'
     );
+    function setMax(id) {
+      scr.querySelectorAll('[data-stat]').forEach(function (el) {
+        if (!id || el.getAttribute('data-stat') === id) el.value = el.max;
+      });
+    }
+    document.getElementById('bot-stat-max').onclick = function () { setMax(); };
+    scr.querySelectorAll('[data-max]').forEach(function (btn) {
+      btn.onclick = function () { setMax(btn.getAttribute('data-max')); };
+    });
     function go() {
       var levels = {};
       var bad = false;
