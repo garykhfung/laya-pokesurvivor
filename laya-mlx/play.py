@@ -1,5 +1,6 @@
 """Serve the sibling pokesurvivor checkout and steer a solo run.
 
+    git clone https://github.com/garykhfung/pokesurvivor.git pokesurvivor
     pip install -r laya-mlx/requirements.txt
     python laya-mlx/play.py
     python laya-mlx/play.py pikachu
@@ -21,7 +22,7 @@ import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from decide import decide, load_agent
+from decide import decide, load_agent, load_policy, record_death
 
 ROOT = Path(__file__).resolve().parent.parent / "pokesurvivor"
 BOT = Path(__file__).resolve().parent
@@ -62,7 +63,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/decide":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/decide", "/death"):
             self.send_error(404)
             return
         n = int(self.headers.get("Content-Length") or 0)
@@ -72,12 +74,12 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             snap = json.loads(self.rfile.read(n).decode("utf-8"))
             with LOCK:
-                out = decide(AGENT, snap)
+                out = record_death(AGENT, snap) if path == "/death" else decide(AGENT, snap)
         except Exception as e:
-            print("[bot] decide failed:", e, file=sys.stderr)
+            print("[bot]", path, "failed:", e, file=sys.stderr)
             self._bytes(500, json.dumps({"error": str(e)}), "application/json")
             return
-        if out.get("action") != "move" or out.get("shielded"):
+        if path == "/decide" and (out.get("action") != "move" or out.get("shielded")):
             print("[bot]", out.get("action"), out.get("label"), "shielded" if out.get("shielded") else "")
         self._bytes(200, json.dumps(out), "application/json")
 
@@ -135,7 +137,20 @@ def serve(agent, open_browser=True):
     return httpd, proc
 
 
+def require_game():
+    if (ROOT / "dev.html").is_file():
+        return
+    sys.exit(
+        "No PokéSurvivor checkout at %s\n"
+        "Download it, then run:\n"
+        "  git clone https://github.com/garykhfung/pokesurvivor.git pokesurvivor\n"
+        "  python laya-mlx/play.py" % ROOT
+    )
+
+
 def main():
+    require_game()
+    load_policy()
     agent = load_agent()
     httpd, _proc = serve(agent)
     try:
