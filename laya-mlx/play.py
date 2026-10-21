@@ -1,5 +1,6 @@
 """Serve the sibling pokesurvivor checkout and steer a solo run.
 
+    git clone https://github.com/garykhfung/pokesurvivor.git pokesurvivor
     pip install -r laya-mlx/requirements.txt
     python laya-mlx/play.py
     python laya-mlx/play.py pikachu
@@ -182,7 +183,19 @@ def serve(agent, open_browser=True):
     return httpd, proc
 
 
+def require_game():
+    if (ROOT / "dev.html").is_file():
+        return
+    sys.exit(
+        "No PokéSurvivor checkout at %s\n"
+        "Download it, then run:\n"
+        "  git clone https://github.com/garykhfung/pokesurvivor.git pokesurvivor\n"
+        "  python laya-mlx/play.py" % ROOT
+    )
+
+
 def main():
+    require_game()
     agent = load_agent()
     httpd, _proc = serve(agent)
     try:
