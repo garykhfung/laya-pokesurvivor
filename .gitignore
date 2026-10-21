@@ -8,6 +8,3 @@ venv/
 .env
 .env.*
 .DS_Store
-
-# Live book of each Pokémon's longest run. Written by play.py.
-laya-mlx/records.json

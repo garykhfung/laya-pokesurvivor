@@ -543,10 +543,10 @@
 
   function titled(text) { return (G.T && G.T(text)) || text; }
 
-  function randomLevels() {
+  function maxLevels() {
     var levels = {};
     ((G.Upgrades && G.Upgrades.LIST) || []).forEach(function (u) {
-      levels[u.id] = (Math.random() * (u.max + 1)) | 0;
+      levels[u.id] = u.max;
     });
     return levels;
   }
@@ -718,7 +718,7 @@
       if (btn) btn.click();
       try {
         var next = tune.randomMon ? randomMon() : null;
-        if (next) begin(next, runSetup.shiny, randomLevels());
+        if (next) begin(next, runSetup.shiny, maxLevels());
         else G.Flow.play();
       } catch (e) { console.error('[bot]', e); }
       return;
@@ -829,7 +829,7 @@
       tune.randomMon = true;
       saveTune();
       scr.remove();
-      then(mon, shinyBox.checked, randomLevels());
+      then(mon, shinyBox.checked, maxLevels());
     };
     function go() {
       tune.randomMon = false;

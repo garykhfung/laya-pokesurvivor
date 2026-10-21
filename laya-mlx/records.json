@@ -1,0 +1,284 @@
+{
+  "15": {
+    "name": "Beedrill",
+    "dex": 15,
+    "played": 3,
+    "best": 143,
+    "bestRun": {
+      "dex": 15,
+      "name": "Beedrill",
+      "shiny": false,
+      "time": 143,
+      "level": 4,
+      "kills": 30,
+      "bosses": 0,
+      "item": "",
+      "atk": 1.32,
+      "spa": 1.05,
+      "spd": 110,
+      "hp": 119,
+      "stats": [
+        "Learning \u00d71",
+        "Power \u00d71",
+        "Vigor \u00d71"
+      ],
+      "moves": [
+        "Picadura 1"
+      ],
+      "upgrades": []
+    }
+  },
+  "702": {
+    "name": "Dedenne",
+    "dex": 702,
+    "played": 1,
+    "best": 5,
+    "bestRun": {
+      "dex": 702,
+      "name": "Dedenne",
+      "shiny": false,
+      "time": 5,
+      "level": 1,
+      "kills": 0,
+      "bosses": 0,
+      "item": "",
+      "atk": 1.31,
+      "spa": 1.47,
+      "spd": 124,
+      "hp": 132,
+      "stats": [],
+      "moves": [
+        "Impactrueno 1",
+        "Giro R\u00e1pido 1"
+      ],
+      "upgrades": [
+        "Vitality 4",
+        "Strength 7",
+        "Stride 1",
+        "Armor 3",
+        "Synthesis 1",
+        "Magnet 3",
+        "Wisdom 8",
+        "Fortune 5",
+        "Repertoire 1",
+        "Critical Hit 1",
+        "Card reroll 5",
+        "Starting move 1"
+      ]
+    }
+  },
+  "830": {
+    "name": "Eldegoss",
+    "dex": 830,
+    "played": 1,
+    "best": 105,
+    "bestRun": {
+      "dex": 830,
+      "name": "Eldegoss",
+      "shiny": false,
+      "time": 105,
+      "level": 8,
+      "kills": 109,
+      "bosses": 0,
+      "item": "",
+      "atk": 1.01,
+      "spa": 1.19,
+      "spd": 115,
+      "hp": 201,
+      "stats": [
+        "Synthesis \u00d71",
+        "Armor \u00d71",
+        "Vigor \u00d72"
+      ],
+      "moves": [
+        "L\u00e1tigo Cepa 1",
+        "Golpe Cuerpo 3",
+        "Ataque R\u00e1pido 1"
+      ],
+      "upgrades": [
+        "Vitality 8",
+        "Strength 1",
+        "Stride 4",
+        "Reflexes 5",
+        "Armor 8",
+        "Magnet 1",
+        "Wisdom 3",
+        "Fortune 5",
+        "Repertoire 1",
+        "Critical Hit 5",
+        "Card reroll 5"
+      ]
+    }
+  },
+  "202": {
+    "name": "Wobbuffet",
+    "dex": 202,
+    "played": 1,
+    "best": 62,
+    "bestRun": {
+      "dex": 202,
+      "name": "Wobbuffet",
+      "shiny": false,
+      "time": 62,
+      "level": 6,
+      "kills": 33,
+      "bosses": 0,
+      "item": "",
+      "atk": 0.88,
+      "spa": 0.88,
+      "spd": 106,
+      "hp": 192,
+      "stats": [
+        "Magnet \u00d71",
+        "Vigor \u00d71",
+        "Synthesis \u00d71"
+      ],
+      "moves": [
+        "Confusi\u00f3n 1",
+        "Ataque R\u00e1pido 1",
+        "Giro R\u00e1pido 1",
+        "Golpe Cuerpo 1"
+      ],
+      "upgrades": [
+        "Vitality 2",
+        "Stride 5",
+        "Reflexes 6",
+        "Armor 2",
+        "Synthesis 3",
+        "Wisdom 1",
+        "Fortune 3",
+        "Repertoire 1",
+        "Critical Hit 6",
+        "Card reroll 3",
+        "Ban 1"
+      ]
+    }
+  },
+  "980": {
+    "name": "Clodsire",
+    "dex": 980,
+    "played": 1,
+    "best": 61,
+    "bestRun": {
+      "dex": 980,
+      "name": "Clodsire",
+      "shiny": false,
+      "time": 61,
+      "level": 7,
+      "kills": 48,
+      "bosses": 0,
+      "item": "",
+      "atk": 1.22,
+      "spa": 1.05,
+      "spd": 89,
+      "hp": 200,
+      "stats": [
+        "Learning \u00d73",
+        "Power \u00d71"
+      ],
+      "moves": [
+        "Residuos 1",
+        "Bucle Arena 2",
+        "Picotazo Veneno 1"
+      ],
+      "upgrades": [
+        "Vitality 9",
+        "Stride 1",
+        "Reflexes 5",
+        "Armor 7",
+        "Magnet 5",
+        "Wisdom 6",
+        "Fortune 1",
+        "Repertoire 1",
+        "Critical Hit 3",
+        "Card reroll 3",
+        "Ban 3"
+      ]
+    }
+  },
+  "149": {
+    "name": "Dragonite",
+    "dex": 149,
+    "played": 1,
+    "best": 93,
+    "bestRun": {
+      "dex": 149,
+      "name": "Dragonite",
+      "shiny": false,
+      "time": 93,
+      "level": 7,
+      "kills": 56,
+      "bosses": 0,
+      "item": "",
+      "atk": 1.44,
+      "spa": 1.25,
+      "spd": 132,
+      "hp": 183,
+      "stats": [
+        "Learning \u00d71"
+      ],
+      "moves": [
+        "Furia Drag\u00f3n 3",
+        "Agilidad 1",
+        "Maquinaci\u00f3n 1",
+        "Placaje 1"
+      ],
+      "upgrades": [
+        "Vitality 9",
+        "Stride 6",
+        "Reflexes 8",
+        "Armor 2",
+        "Magnet 6",
+        "Wisdom 2",
+        "Fortune 6",
+        "Critical Hit 5",
+        "Card reroll 1",
+        "Ban 1"
+      ]
+    }
+  },
+  "746": {
+    "name": "Wishiwashi",
+    "dex": 746,
+    "played": 1,
+    "best": 122,
+    "bestRun": {
+      "dex": 746,
+      "name": "Wishiwashi",
+      "shiny": false,
+      "time": 122,
+      "level": 11,
+      "kills": 123,
+      "bosses": 0,
+      "item": "",
+      "atk": 0.94,
+      "spa": 0.97,
+      "spd": 123,
+      "hp": 114,
+      "stats": [
+        "Sprint \u00d71",
+        "Reflexes \u00d72",
+        "Magnet \u00d71",
+        "Learning \u00d71"
+      ],
+      "moves": [
+        "Pistola Agua 3",
+        "Fortaleza 1",
+        "Maquinaci\u00f3n 2"
+      ],
+      "upgrades": [
+        "Vitality 3",
+        "Strength 4",
+        "Stride 7",
+        "Reflexes 8",
+        "Armor 5",
+        "Synthesis 1",
+        "Magnet 4",
+        "Wisdom 7",
+        "Fortune 5",
+        "Critical Hit 6",
+        "Card reroll 2"
+      ]
+    }
+  }
+}
