@@ -145,6 +145,7 @@
       g.forEach(function (m, mi) {
         out.push({
           name: m.name, id: m.id, kind: m.kind, type: m.type, lvl: m.lvl,
+          cat: m.cat || (G.Moves && G.Moves.BY_ID[m.id] && G.Moves.BY_ID[m.id].cat) || '',
           max: m.maxLvl || (m.def && m.def.maxLvl) || 5, evolved: !!m.evolved,
           slot: si, lead: mi === 0, active: si === pl.active, group: g.length,
           reach: hitReach(m)
@@ -186,18 +187,26 @@
     var pl = G.Game.player;
     if (!pl || !pl.slots || !pl.slots.length) return;
     var wantShort = tune.range === 'short';
-    var bestSlot = -1, bestKey = 0, bestLvl = -1;
+    var dodge = tune.dodge || 150;
+    var groups = [];
     pl.slots.forEach(function (g, i) {
       if (!hasAttack(g)) return;
-      var reach = 0, lvl = 0;
+      var reach = 0, lvl = 0, rush = true;
       g.forEach(function (m) {
         if (m.kind === 'buff') return;
+        if (m.kind !== 'dash') rush = false;
         reach = Math.max(reach, hitReach(m));
         if (m.lvl > lvl) lvl = m.lvl;
       });
-      var key = wantShort ? (reach || 9999) : -reach;
-      if (bestSlot < 0 || key < bestKey || (key === bestKey && lvl > bestLvl)) {
-        bestKey = key; bestLvl = lvl; bestSlot = i;
+      groups.push({ i: i, reach: reach, lvl: lvl, rush: rush });
+    });
+    var pool = groups.filter(function (g) { return !g.rush; });
+    if (!pool.length) pool = groups;
+    var bestSlot = -1, bestKey = 0, bestLvl = -1;
+    pool.forEach(function (g) {
+      var key = wantShort ? (g.reach || 9999) : (g.reach >= dodge ? -g.reach : 1e6 - g.reach);
+      if (bestSlot < 0 || key < bestKey || (key === bestKey && g.lvl > bestLvl)) {
+        bestKey = key; bestLvl = g.lvl; bestSlot = g.i;
       }
     });
     if (bestSlot >= 0 && bestSlot !== pl.active) tap('Digit' + (bestSlot + 1));
@@ -412,6 +421,7 @@
       hazards: hazards,
       shots: shots,
       goals: goals,
+      boss: !!(G.EnemyMgr && G.EnemyMgr.all && G.EnemyMgr.all().some(function (e) { return e && !e.dead && e.boss; })),
       safe: pl && ph === 'playing' ? safeDirs(pl) : [],
       nudge: ph === 'playing' ? nudge : '',
       trail: ph === 'playing' ? posTrail() : [],
@@ -423,7 +433,7 @@
   }
 
   var logKey = '';
-  var tune = { dodge: 150, range: 'long', item: 'luckyegg', randomMon: false };
+  var tune = { dodge: 150, range: 'long', item: 'focussash', randomMon: false };
   var runSetup = { dex: 0, shiny: false, levels: {} };
   try {
     var kept = JSON.parse(localStorage.getItem('laya.tune') || 'null');
@@ -642,11 +652,14 @@
       if (best.upgrades && best.upgrades.length) lines.push(best.upgrades.join('  '));
       if (best.hp) lines.push('Atk ×' + best.atk + '  Sp ×' + best.spa + '  Spd ' + best.spd + '  HP ' + best.hp);
     }
+    var name = (pl.mon && pl.mon.name) || '';
+    if (name) lines.unshift(name);
     var box = panel.querySelector('.v');
     box.textContent = '';
     lines.forEach(function (line) {
       var row = document.createElement('div');
       if (!line) row.style.height = '6px';
+      else if (line === name) row.style.cssText = 'font-weight:700';
       else if (line === 'This run' || line === 'Record') row.style.cssText = 'color:#9ec0ff;font-size:11px';
       row.textContent = line;
       box.appendChild(row);
@@ -718,7 +731,7 @@
       if (btn) btn.click();
       try {
         var next = tune.randomMon ? randomMon() : null;
-        if (next) begin(next, runSetup.shiny, maxLevels());
+        if (next) begin(next, runSetup.shiny, maxLevels(), true);
         else G.Flow.play();
       } catch (e) { console.error('[bot]', e); }
       return;
@@ -768,7 +781,32 @@
     return pool.length ? pool[(Math.random() * pool.length) | 0] : null;
   }
 
-  function begin(mon, shiny, levels) {
+  function armMoves(mon) {
+    var save = G.DB.save;
+    var choices = (G.startChoices ? G.startChoices(mon.dex) : []).filter(function (id) {
+      var m = G.Moves && G.Moves.BY_ID[id];
+      return m && m.kind !== 'buff';
+    });
+    if (!choices.length) return;
+    function reachOf(id) { return hitReach(G.Moves.BY_ID[id]); }
+    function rush(id) { return G.Moves.BY_ID[id].kind === 'dash'; }
+    var stayed = choices.filter(function (id) { return !rush(id); });
+    var pool = stayed.length ? stayed : choices;
+    pool.sort(function (a, b) { return reachOf(b) - reachOf(a); });
+    var start = pool[0];
+    var base = G.baseStartOf ? G.baseStartOf(mon.dex) : start;
+    save.pstart = save.pstart || {};
+    if (start === base) delete save.pstart[mon.dex];
+    else save.pstart[mon.dex] = start;
+    var n = G.DB.upgradesOf(mon.dex).ban | 0;
+    var rushes = choices.filter(function (id) { return id !== start && rush(id); });
+    var rest = choices.filter(function (id) { return id !== start && !rush(id); })
+      .sort(function (a, b) { return reachOf(a) - reachOf(b); });
+    save.pban = save.pban || {};
+    save.pban[mon.dex] = rushes.concat(rest).slice(0, n);
+  }
+
+  function begin(mon, shiny, levels, roll) {
     runSetup = { dex: mon.dex, shiny: !!shiny, levels: levels || {} };
     G.DB.playAsGuest();
     var save = G.DB.save;
@@ -784,6 +822,7 @@
       if (n) ups[u.id] = n;
       else delete ups[u.id];
     });
+    if (roll) armMoves(mon);
     G.Flow.goMenu();
     G.Flow.play();
     console.log('[bot] run', mon.name, save.partnerShiny ? 'shiny' : '', G.Game.state);
@@ -829,7 +868,7 @@
       tune.randomMon = true;
       saveTune();
       scr.remove();
-      then(mon, shinyBox.checked, maxLevels());
+      then(mon, shinyBox.checked, maxLevels(), true);
     };
     function go() {
       tune.randomMon = false;
@@ -909,9 +948,9 @@
     var tapEl = document.getElementById('tap-start');
     if (tapEl && !tapEl.classList.contains('hidden')) { tapEl.click(); setTimeout(arm, 50); return; }
     pullRecords();
-    ask(function (mon, shiny, levels) {
+    ask(function (mon, shiny, levels, roll) {
       if (G.Game.state === 'ui') {
-        try { begin(mon, shiny, levels); }
+        try { begin(mon, shiny, levels, roll); }
         catch (e) { console.error('[bot] start', e); return; }
       }
       if (!loop) { loop = true; setInterval(tick, 200); }

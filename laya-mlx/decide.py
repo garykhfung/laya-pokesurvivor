@@ -4,7 +4,10 @@ play.py posts each snapshot from bridge.js here. Movement is a fixed rule, and
 so are the usual level-up, bond, and item picks. Laya is asked only when a card
 is on screen and no rule takes it. The model sees one English paragraph from
 describe(); shield() then keeps its answer inside the labels that were offered.
-What those rules do is written up in README.md under "How it plays".
+The run is trying to last until the Judgment at 30 minutes. A dash is never the
+attack that is kept: Quick Attack, Aerial Ace, Flame Charge, and U-turn carry
+the Pokémon into the horde. What those rules do is written up in README.md
+under "How it plays".
 
 Running this file checks those rules and does not load the model:
 
@@ -19,6 +22,7 @@ A snapshot is the dict bridge.js builds. The fields this file reads:
     nudge     a forced heading when the feet have barely moved for 3 seconds
     trail     recent feet, used to leave a patch that has not moved
     enemies, shots, hazards, traps, blocks, pickups, goals
+    boss      a boss is alive; a Meowth and a shiny wait unless a rift is open
     tune      {dodge, range, item} from the side panel, for this run
     moves     known attacks and buffs, with slot, group, active, reach
     cards     the options on screen; empty while playing
@@ -348,16 +352,20 @@ def _danger(snap, cx, cy, pr):
     return depth
 
 
-_GOAL_RANK = {"thief": 3, "shiny": 2, "rift": 1}
+# A rift closes in 45 seconds and winning it awards the move merge.
+_GOAL_RANK = {"rift": 3, "thief": 2, "shiny": 1}
 
 
 def _goal(snap):
-    """Meowth first (it flees), then a shiny, then a void."""
+    """An open rift first. While a boss is alive, a Meowth and a shiny wait."""
+    boss = bool(snap.get("boss"))
     best = None
     best_key = None
     for g in snap.get("goals") or []:
         kind = g.get("kind")
         if kind not in _GOAL_RANK:
+            continue
+        if boss and kind != "rift":
             continue
         key = (_GOAL_RANK[kind], -float(g.get("dist") or 0))
         if best_key is None or key > best_key:
@@ -471,7 +479,16 @@ def shield(choice, probabilities, safe):
 
 
 SWORDS = "swords-dance"
+NASTY = "nasty-plot"
 HARDEN = "harden"
+
+
+def _fuse_order(anchor):
+    """The buff that matches the anchor, then Harden, then the other dance."""
+    cat = anchor.get("cat") if anchor else ""
+    dance = SWORDS if cat == "physical" else NASTY if cat == "special" else SWORDS
+    other = NASTY if dance == SWORDS else SWORDS
+    return (dance, HARDEN, other)
 
 
 def _moves(snap):
@@ -513,9 +530,9 @@ def _attack_cards(cards, moves):
     return out
 
 
-# Regen and experience first, then the other run-long stats. The berry is a one-shot heal.
-_PERMANENT = ("rgn", "xp", "atk", "hp", "cd", "def", "mag", "spd")
-_EXP_ITEMS = ("luckyegg",)
+# Experience and damage first, then the other run-long stats. The berry is a one-shot heal.
+_PERMANENT = ("xp", "atk", "hp", "rgn", "cd", "def", "mag", "spd")
+_SURVIVE_ITEMS = ("focussash", "leftovers")
 _ATK_ITEMS = ("choiceband", "lifeorb")
 
 
@@ -551,14 +568,31 @@ def _upgrade_of(cards, mid):
     return _find(cards, lambda c: c.get("move") == mid and (c.get("upgrade") or "→" in (c.get("label") or "")))
 
 
-def level_choice(cards, moves):
-    """Level the firing slot only. Once that attack is maxed or evolved, take a permanent stat.
+def _carry(moves, dodge):
+    """Longest attack that still connects from the dodge distance. A dash is skipped."""
+    far = [
+        m for m in moves
+        if m.get("kind") not in ("buff", "dash") and float(m.get("reach") or 0) >= float(dodge)
+    ]
+    if not far:
+        return None
+    return max(far, key=lambda m: (float(m.get("reach") or 0), m.get("lvl") or 0))
 
-    A move in another slot, and a move not yet learned, is left alone. A stat
-    still wins when this offer has no level for the slot that is firing.
+
+def level_choice(cards, moves, dodge=150, style=""):
+    """Level the attack this run is keeping. A long run skips one that cannot hit from the dodge distance.
+    A dash is skipped too.
+
+    Once that attack is maxed or evolved, take a permanent stat. A move in another
+    slot, and a move not yet learned, is left alone.
     """
-    using = _in_use(moves)
-    attacks = [m for m in using if m.get("kind") != "buff"]
+    if style == "long":
+        carry = _carry(moves, dodge)
+        slot = carry.get("slot") if carry else None
+        using = [m for m in moves if slot is not None and m.get("slot") == slot]
+    else:
+        using = _in_use(moves)
+    attacks = [m for m in using if m.get("kind") not in ("buff", "dash")]
     buffs = [m for m in using if m.get("kind") == "buff"]
     for m in attacks + buffs:
         if _done(m):
@@ -577,8 +611,8 @@ def level_choice(cards, moves):
     return None
 
 
-def bond_choice(cards, moves, bond):
-    """Anchor the most upgraded attack, fuse Swords Dance then Harden, then a different-type attack."""
+def bond_choice(cards, moves, bond, dodge=150, style=""):
+    """Anchor the kept attack. Fuse the matching buff, then Harden, then a different-type attack."""
     if not bond:
         return None
     by_id = {m.get("id"): m for m in moves}
@@ -591,31 +625,39 @@ def bond_choice(cards, moves, bond):
 
     def strongest(pred=None):
         opts = [(i, m) for i, m in _attack_cards(cards, moves) if not pred or pred(m)]
+        calm = [im for im in opts if im[1].get("kind") != "dash"]
+        if calm:
+            opts = calm
         if not opts:
             return None
+        if style == "long":
+            far = [im for im in opts if float(im[1].get("reach") or 0) >= float(dodge)]
+            if far:
+                return max(far, key=lambda im: (float(im[1].get("reach") or 0), im[1].get("lvl") or 0))[0]
         return max(opts, key=lambda im: (im[1].get("lvl") or 0, im[1].get("name") or ""))[0]
 
     if mode == "pair" and step == 1:
         return strongest()
     if mode == "pair" and step == 2:
-        for mid in (SWORDS, HARDEN):
+        first = by_id.get(bond.get("first"))
+        for mid in _fuse_order(first):
             hit = named(mid)
             if hit is not None:
                 return hit
-        first = by_id.get(bond.get("first"))
         ftype = first.get("type") if first and first.get("kind") != "buff" else None
         if ftype:
             hit = strongest(lambda m: m.get("type") != ftype)
             if hit is not None:
                 return hit
         return strongest()
-    for mid in (SWORDS, HARDEN):
+    anchor = next((m for m in group if m.get("kind") != "buff"), None)
+    for mid in _fuse_order(anchor):
         if mid not in have:
             hit = named(mid)
             if hit is not None:
                 return hit
-    anchor = next((m for m in group if m.get("kind") != "buff"), None)
-    if anchor and (len(group) >= 3 or {SWORDS, HARDEN} <= have):
+    buffs_done = {SWORDS, HARDEN} <= have or {NASTY, HARDEN} <= have
+    if anchor and (len(group) >= 3 or buffs_done):
         hit = strongest(lambda m: m.get("type") != anchor.get("type"))
         if hit is not None:
             return hit
@@ -623,12 +665,14 @@ def bond_choice(cards, moves, bond):
 
 
 def item_choice(cards, time, prefer=None):
-    """The side-panel item first. Otherwise Lucky Egg for 10 minutes, then Choice Band over Life Orb."""
+    """The side-panel item first. Otherwise Focus Sash, then Leftovers, until 10 minutes.
+    After that, Choice Band over Life Orb.
+    """
     ids = [c.get("item") or "" for c in cards]
     if not any(ids):
         return None
     order = [prefer] if prefer else []
-    order.extend(_EXP_ITEMS if float(time or 0) < 600 else _ATK_ITEMS)
+    order.extend(_SURVIVE_ITEMS if float(time or 0) < 600 else _ATK_ITEMS)
     seen = set()
     for iid in order:
         if not iid or iid in seen:
@@ -646,12 +690,15 @@ def build_choice(snap):
     if not cards:
         return None
     phase = snap.get("phase")
+    tune = _tune(snap)
+    dodge = float(tune.get("dodge") or 150)
+    style = tune.get("range") or ""
     if phase == "levelup":
-        return level_choice(cards, _moves(snap))
+        return level_choice(cards, _moves(snap), dodge, style)
     if phase == "item":
-        return item_choice(cards, snap.get("time") or 0, _tune(snap).get("item"))
+        return item_choice(cards, snap.get("time") or 0, tune.get("item"))
     if phase == "bond":
-        return bond_choice(cards, _moves(snap), snap.get("bond"))
+        return bond_choice(cards, _moves(snap), snap.get("bond"), dodge, style)
     return None
 
 
@@ -772,6 +819,14 @@ def _check():
         {"label": "Pistola Agua", "move": "water-gun", "kind": "projectile", "type": "water"},
     ]
     assert bond_choice(off, moves + [flame], {"mode": "add", "step": 1, "group": ["ember", "swords-dance", "harden"], "first": ""}) == 1
+    special = [
+        {"label": "Danza Espada", "move": "swords-dance"},
+        {"label": "Maquinación", "move": "nasty-plot"},
+        {"label": "Fortaleza", "move": "harden"},
+    ]
+    hyper = {"id": "hyper-beam", "kind": "charge", "cat": "special", "type": "normal", "lvl": 1, "slot": 0, "active": True}
+    assert bond_choice(special, [hyper], {"mode": "pair", "step": 2, "group": [], "first": "hyper-beam"}) == 1
+    assert bond_choice(special, [dict(ember, cat="physical")], {"mode": "pair", "step": 2, "group": [], "first": "ember"}) == 0
     fused = [dict(ember, group=4)]
     assert level_choice([
         {"label": "Ascuas", "move": "ember", "upgrade": True},
@@ -794,22 +849,50 @@ def _check():
         {"label": "Aprendizaje", "stat": "xp"},
     ], fused) == 1
     assert level_choice([
+        {"label": "Síntesis", "stat": "rgn"},
+        {"label": "Potencia", "stat": "atk"},
+    ], [dict(ember, lvl=5)]) == 1
+    short = dict(ember, reach=48)
+    far_move = dict(water, reach=400, slot=1, active=False)
+    assert level_choice([
+        {"label": "Ascuas", "move": "ember", "upgrade": True},
+        {"label": "Aprendizaje", "stat": "xp"},
+    ], [short], 150, "long") == 1
+    assert level_choice([
+        {"label": "Ascuas", "move": "ember", "upgrade": True},
+        {"label": "Pistola Agua", "move": "water-gun", "upgrade": True},
+    ], [short, far_move], 150, "long") == 1
+    dash = {"id": "quick-attack", "kind": "dash", "reach": 170, "slot": 0, "active": True, "lvl": 1}
+    beam = {"id": "water-gun", "kind": "projectile", "reach": 200, "slot": 1, "active": False, "lvl": 1}
+    assert level_choice([
+        {"label": "Ataque Rápido", "move": "quick-attack", "upgrade": True},
+        {"label": "Pistola Agua", "move": "water-gun", "upgrade": True},
+    ], [dash, beam], 150, "long") == 1
+    assert level_choice([
+        {"label": "Ataque Rápido", "move": "quick-attack", "upgrade": True},
+        {"label": "Aprendizaje", "stat": "xp"},
+    ], [dash], 150, "long") == 1
+    assert bond_choice([
+        {"label": "Ataque Rápido", "move": "quick-attack", "kind": "dash", "fresh": True},
+        {"label": "Pistola Agua", "move": "water-gun", "kind": "projectile", "type": "water"},
+    ], [dash, beam], {"mode": "pair", "step": 1, "group": [], "first": ""}, 150, "long") == 1
+    assert level_choice([
         {"label": "Lanzallamas", "move": "flamethrower", "fresh": True, "kind": "cone"},
         {"label": "Ascuas", "move": "ember", "upgrade": True},
     ], fused) == 1
     assert item_choice([
-        {"item": "leftovers"}, {"item": "luckyegg"},
+        {"item": "leftovers"}, {"item": "focussash"},
     ], 120) == 1
     assert item_choice([
         {"item": "luckyegg"}, {"item": "choiceband"},
-    ], 120) == 0
+    ], 120) is None
     assert item_choice([
         {"item": "luckyegg"}, {"item": "choiceband"},
     ], 600) == 1
     assert item_choice([
         {"item": "choiceband"}, {"item": "lifeorb"},
     ], 700) == 0
-    assert item_choice([{"item": "leftovers"}, {"item": "shellbell"}], 100) is None
+    assert item_choice([{"item": "leftovers"}, {"item": "shellbell"}], 100) == 0
     assert item_choice([
         {"item": "luckyegg"}, {"item": "lifeorb"},
     ], 100, "lifeorb") == 1
@@ -907,7 +990,19 @@ def _check():
             {"kind": "rift", "dx": 40, "dy": 0, "dist": 40},
             {"kind": "thief", "dx": 0, "dy": -120, "dist": 120},
         ],
-    }) == "move north"
+    }) == "move east"
+    assert steer({
+        "safe": ways, "r": 14, "boss": True, "enemies": [],
+        "goals": [{"kind": "thief", "dx": 80, "dy": 0, "dist": 80}],
+        "pickups": [{"kind": "coin", "dx": -100, "dy": 0}],
+    }) == "move west"
+    assert steer({
+        "safe": ways, "r": 14, "boss": True, "enemies": [], "pickups": [],
+        "goals": [
+            {"kind": "rift", "dx": 80, "dy": 0, "dist": 80},
+            {"kind": "thief", "dx": 0, "dy": -120, "dist": 120},
+        ],
+    }) == "move east"
     blocked = steer({
         "safe": ways, "r": 14, "pickups": [],
         "enemies": [{"dx": 24, "dy": 0, "r": 16}],
